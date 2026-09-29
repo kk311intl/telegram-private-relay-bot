@@ -84,7 +84,9 @@ Set-Clipboard $null
 
 ### 使用與檢查
 
-使用者私聊 Bot；Topic 模式由管理者在對應 Topic 回覆，私聊模式則須直接回覆 Bot 轉來的訊息。支援文字、一般媒體、相簿和編輯同步；Telegram 不允許複製的訊息類型無法轉送。使用者可用 `/start`、`/id`。Topic 模式的管理者可在 Topic 使用 `/user`、`/block`、`/unblock`、`/close`、`/help`；私聊模式須回覆對應訊息才能使用 `/user`、`/block`、`/unblock`，並可直接傳送 `/start` 或 `/help` 查看提示。`/close` 僅適用於 Topic。
+使用者私聊 Bot；Topic 模式由管理者在對應 Topic 回覆，私聊模式則須直接回覆 Bot 轉來的訊息。支援文字、一般媒體、相簿和編輯同步；Telegram 不允許複製的訊息類型無法轉送。使用者可用 `/start`、`/id`。Topic 模式的管理者可在 Topic 使用 `/user`、`/block`、`/unblock`、`/close`、`/help`；私聊模式須回覆對應訊息才能使用 `/user`、`/block`、`/unblock`。管理者可直接私聊 Bot 傳 `/status` 查看近 24 小時的處理狀態與 Webhook 待處理數；Topic 模式也可在管理群組的 Topic 使用。管理者私聊 Bot 傳 `/start` 會設定只有本人可見、依部署模式區分的 Telegram 指令選單；`/close` 僅適用於 Topic。
+
+使用者傳 `/forget` 會先看到確認說明，只有傳 `/forget confirm` 才清除 Bot 的 D1 個人資料、相簿暫存及轉送對照。若使用者被封鎖，仍保留 ID 與封鎖狀態，避免清除指令繞過封鎖；管理者可在 Bot 私聊傳 `/unblock 使用者ID` 解封。這**不會刪除 Telegram 兩端已有的聊天訊息或既有備份**；之後再傳訊可能重新建立資料。`/status` 是運行狀態摘要，不能替代真人收發測試。
 
 ```powershell
 Invoke-RestMethod 'https://YOUR_WORKER.workers.dev/health'
@@ -179,7 +181,9 @@ Set-Clipboard $null
 
 ### 使い方と確認
 
-ユーザーは Bot に私信を送ります。トピックモードでは管理者が該当トピックで返信し、私信モードでは Bot から転送されたメッセージに返信します。テキスト、通常のメディア、アルバム、編集の同期に対応します。Telegram がコピーを許可しない種類のメッセージは転送できません。ユーザー用コマンドは `/start`、`/id` です。トピックモードでは管理者がトピック内で `/user`、`/block`、`/unblock`、`/close`、`/help` を使えます。私信モードでは対象メッセージへの返信で `/user`、`/block`、`/unblock` を使い、`/start` または `/help` は直接送信できます。`/close` はトピック専用です。
+ユーザーは Bot に私信を送ります。トピックモードでは管理者が該当トピックで返信し、私信モードでは Bot から転送されたメッセージに返信します。テキスト、通常のメディア、アルバム、編集の同期に対応します。Telegram がコピーを許可しない種類のメッセージは転送できません。ユーザー用コマンドは `/start`、`/id` です。トピックモードでは管理者がトピック内で `/user`、`/block`、`/unblock`、`/close`、`/help` を使えます。私信モードでは対象メッセージへの返信で `/user`、`/block`、`/unblock` を使います。管理者は Bot との私信で `/status` を送ると過去24時間の処理状況と Webhook の保留件数を確認できます。トピックモードでは管理グループのトピック内でも使えます。管理者が Bot との私信で `/start` を送ると、本人だけに表示されるモード別の Telegram コマンドメニューが設定されます。`/close` はトピック専用です。
+
+ユーザーが `/forget` を送ると確認方法が表示され、`/forget confirm` を送った場合にのみ Bot の D1 に保存された個人情報、アルバムの一時データ、転送対応が消去されます。ブロック中の場合は、ブロックを回避できないよう ID とブロック状態だけが残り、管理者は Bot との私信で `/unblock ユーザーID` を送って解除できます。**Telegram の両側に既にあるチャットメッセージと既存のバックアップは削除されません**。再送信すると情報が作成される場合があります。`/status` は稼働状況の要約であり、実際の送受信テストの代わりにはなりません。
 
 ```powershell
 Invoke-RestMethod 'https://YOUR_WORKER.workers.dev/health'
@@ -274,7 +278,9 @@ If you do not know the group ID, register the webhook, have the admin send `/set
 
 ### Use and verify
 
-Users message the bot privately. In topic mode, the admin replies in the matching topic; in private-chat mode, the admin must reply to the relayed message. Text, ordinary media, albums, and edit syncing are supported. Telegram message types that cannot be copied cannot be relayed. Users can run `/start` and `/id`. In topic mode, the admin can run `/user`, `/block`, `/unblock`, `/close`, and `/help` inside a topic. In private-chat mode, `/user`, `/block`, and `/unblock` must be replies to a relayed message; `/start` or `/help` can be sent directly. `/close` is topic-only.
+Users message the bot privately. In topic mode, the admin replies in the matching topic; in private-chat mode, the admin must reply to the relayed message. Text, ordinary media, albums, and edit syncing are supported. Telegram message types that cannot be copied cannot be relayed. Users can run `/start` and `/id`. In topic mode, the admin can run `/user`, `/block`, `/unblock`, `/close`, and `/help` inside a topic. In private-chat mode, `/user`, `/block`, and `/unblock` must be replies to a relayed message. The admin can send `/status` in the Bot's private chat to see the past 24 hours of processing and the webhook pending count; it also works in a management-group topic. Sending `/start` in the Bot's private chat sets a mode-specific Telegram command menu visible only to that admin. `/close` is topic-only.
+
+Sending `/forget` shows confirmation instructions; only `/forget confirm` erases personal data, album staging, and relay mappings stored in the Bot's D1. For blocked users, the ID and blocked state remain so this command cannot bypass a block; the admin can later send `/unblock USER_ID` in the Bot's private chat. This **does not delete existing Telegram messages on either side or existing backups**. Sending another message may create new data. `/status` is an operational summary, not a substitute for a real two-way delivery test.
 
 ```powershell
 Invoke-RestMethod 'https://YOUR_WORKER.workers.dev/health'

@@ -138,14 +138,90 @@ async function processMessage(message, env) {
 async function processAdminPrivateMessage(message, env) {
   const command = parseCommand(message.text);
   if (command === "start" || command === "help") {
+    if (command === "start") await configureAdminMenu(env);
     await telegram(env, "sendMessage", {
       chat_id: message.chat.id,
-      text: t(env.BOT_LANGUAGE, env.ADMIN_GROUP_ID ? "adminReadyTopic" : "adminReadyDirect")
+      text: command === "help"
+        ? t(env.BOT_LANGUAGE, env.ADMIN_GROUP_ID ? "adminHelpTopic" : "adminHelpDirect")
+        : t(env.BOT_LANGUAGE, env.ADMIN_GROUP_ID ? "adminReadyTopic" : "adminReadyDirect")
     });
     return;
   }
+  if (command === "status") return sendAdminStatus(message.chat.id, undefined, env);
+  if (command === "unblock") {
+    const targetId = /^\/unblock(?:@[A-Za-z0-9_]+)?\s+(\d+)\s*$/i.exec(message.text.trim())?.[1];
+    if (targetId) {
+      const result = await env.BOT_DB.prepare(`
+        UPDATE users SET blocked = 0, blocked_notice_at = 0, updated_at = ?
+        WHERE user_id = ? AND blocked = 1
+      `).bind(Math.floor(Date.now() / 1000), targetId).run();
+      if (Number(result.meta?.changes || 0) === 1) {
+        await env.BOT_DB.prepare(`
+          DELETE FROM users WHERE user_id = ? AND blocked = 0 AND topic_id IS NULL
+            AND username IS NULL AND first_name = '' AND last_name = ''
+        `).bind(targetId).run();
+      }
+      await telegram(env, "sendMessage", {
+        chat_id: message.chat.id,
+        text: t(env.BOT_LANGUAGE, Number(result.meta?.changes || 0) === 1 ? "unblocked" : "notBlocked")
+      });
+      return;
+    }
+    if (env.ADMIN_GROUP_ID) {
+      await telegram(env, "sendMessage", {
+        chat_id: message.chat.id,
+        text: t(env.BOT_LANGUAGE, "adminHelpTopic")
+      });
+      return;
+    }
+  }
 
   if (!env.ADMIN_GROUP_ID) return processDirectAdminReply(message, env);
+}
+
+async function configureAdminMenu(env) {
+  const language = env.BOT_LANGUAGE;
+  const commands = (names) => names.map((command) => ({
+    command,
+    description: t(language, `command_${command}`)
+  }));
+  try {
+    await telegram(env, "setMyCommands", {
+      scope: { type: "chat", chat_id: env.ADMIN_USER_ID },
+      commands: commands(env.ADMIN_GROUP_ID
+        ? ["start", "help", "status", "unblock"]
+        : ["start", "help", "status", "user", "block", "unblock"])
+    });
+    if (env.ADMIN_GROUP_ID) {
+      await telegram(env, "setMyCommands", {
+        scope: { type: "chat_member", chat_id: env.ADMIN_GROUP_ID, user_id: Number(env.ADMIN_USER_ID) },
+        commands: commands(["help", "status", "user", "block", "unblock", "close"])
+      });
+    }
+  } catch (error) {
+    console.log(JSON.stringify({ event: "admin_menu_setup_failed", error: sanitizeError(error) }));
+  }
+}
+
+async function sendAdminStatus(chatId, topicId, env) {
+  const since = Math.floor(Date.now() / 1000) - 86400;
+  const counts = await env.BOT_DB.prepare(`
+    SELECT status, COUNT(*) AS total FROM processed_updates
+    WHERE updated_at >= ? GROUP BY status
+  `).bind(since).all();
+  const byStatus = Object.fromEntries((counts.results || []).map((row) => [row.status, row.total]));
+  let pending = t(env.BOT_LANGUAGE, "unknown");
+  try {
+    const webhook = await telegram(env, "getWebhookInfo", {});
+    pending = String(webhook.pending_update_count ?? pending);
+  } catch (error) {
+    console.log(JSON.stringify({ event: "admin_status_webhook_unavailable", error: sanitizeError(error) }));
+  }
+  await telegram(env, "sendMessage", {
+    chat_id: chatId,
+    message_thread_id: topicId,
+    text: `${t(env.BOT_LANGUAGE, "adminStatus")}\n${t(env.BOT_LANGUAGE, "statusDone")}: ${byStatus.done || 0}\n${t(env.BOT_LANGUAGE, "statusFailed")}: ${byStatus.failed || 0}\n${t(env.BOT_LANGUAGE, "statusDiscarded")}: ${byStatus.discarded || 0}\n${t(env.BOT_LANGUAGE, "statusPending")}: ${pending}`
+  });
 }
 
 async function processUserMessage(message, env) {
@@ -154,6 +230,17 @@ async function processUserMessage(message, env) {
   let user = await getUser(env.BOT_DB, userId);
 
   if (await getMessageMap(env.BOT_DB, String(message.chat.id), message.message_id)) return;
+
+  const command = parseCommand(message.text);
+  if (command === "forget") {
+    const confirmed = /^\/forget(?:@[A-Za-z0-9_]+)?\s+confirm\s*$/i.test(message.text.trim());
+    if (confirmed) await forgetUser(env.BOT_DB, userId, now);
+    await telegram(env, "sendMessage", {
+      chat_id: message.chat.id,
+      text: t(env.BOT_LANGUAGE, confirmed ? "forgetDone" : "forgetConfirm")
+    });
+    return;
+  }
 
   if (user?.blocked) {
     if (await claimBlockedNotice(env.BOT_DB, userId, now)) {
@@ -178,7 +265,6 @@ async function processUserMessage(message, env) {
   );
   user = await upsertUser(env.BOT_DB, message.from, now);
 
-  const command = parseCommand(message.text);
   if (command === "start") {
     await telegram(env, "sendMessage", {
       chat_id: message.chat.id,
@@ -263,6 +349,28 @@ async function processUserMessage(message, env) {
   });
 }
 
+async function forgetUser(db, userId, now) {
+  await db.batch([
+    db.prepare(`
+      DELETE FROM media_group_messages WHERE EXISTS (
+        SELECT 1 FROM media_groups AS groups
+        WHERE groups.user_id = ?
+          AND groups.source_chat_id = media_group_messages.source_chat_id
+          AND groups.media_group_id = media_group_messages.media_group_id
+      )
+    `).bind(userId),
+    db.prepare("DELETE FROM media_groups WHERE user_id = ?").bind(userId),
+    db.prepare("DELETE FROM message_map WHERE user_id = ?").bind(userId),
+    db.prepare(`
+      UPDATE users SET username = NULL, first_name = '', last_name = '', topic_id = NULL,
+        topic_card_message_id = NULL, topic_lease_until = 0, last_message_at = 0,
+        last_rate_key = NULL, blocked_notice_at = 0, updated_at = ?
+      WHERE user_id = ?
+    `).bind(now, userId),
+    db.prepare("DELETE FROM users WHERE user_id = ? AND blocked = 0").bind(userId)
+  ]);
+}
+
 export async function relayUserMessageToAdmin(message, user, env, now) {
   if (await getMessageMap(env.BOT_DB, String(message.chat.id), message.message_id)) return;
 
@@ -306,7 +414,13 @@ export async function processDirectAdminReply(message, env) {
   if (await getMessageMap(env.BOT_DB, String(message.chat.id), message.message_id)) return;
   const repliedMessageId = message.reply_to_message?.message_id;
   if (!repliedMessageId) {
-    if (parseCommand(message.text)) await sendUnknownCommand(message.chat.id, undefined, env);
+    const command = parseCommand(message.text);
+    if (["user", "block", "unblock"].includes(command)) {
+      await telegram(env, "sendMessage", {
+        chat_id: message.chat.id,
+        text: t(env.BOT_LANGUAGE, "adminHelpDirect")
+      });
+    } else if (command) await sendUnknownCommand(message.chat.id, undefined, env);
     return;
   }
 
@@ -404,13 +518,23 @@ function buildDirectUserStatus(user, language) {
 
 async function processAdminTopicMessage(message, env) {
   if (String(message.from?.id) !== String(env.ADMIN_USER_ID)) return;
+  const command = parseCommand(message.text);
+  if (command === "status") return sendAdminStatus(env.ADMIN_GROUP_ID, message.message_thread_id, env);
+  if (command === "help") {
+    await telegram(env, "sendMessage", {
+      chat_id: env.ADMIN_GROUP_ID,
+      message_thread_id: message.message_thread_id,
+      text: t(env.BOT_LANGUAGE, "adminHelpTopic")
+    });
+    return;
+  }
+
   if (!message.message_thread_id || message.is_topic_message === false) return;
   if (await getMessageMap(env.BOT_DB, String(message.chat.id), message.message_id)) return;
 
   const user = await getUserByTopic(env.BOT_DB, message.message_thread_id);
   if (!user) return;
 
-  const command = parseCommand(message.text);
   if (command) {
     const handled = await handleAdminCommand(command, message, user, env);
     if (handled) return;
@@ -484,14 +608,6 @@ async function handleAdminCommand(command, message, user, env) {
     await telegram(env, "closeForumTopic", {
       chat_id: env.ADMIN_GROUP_ID,
       message_thread_id: message.message_thread_id
-    });
-    return true;
-  }
-  if (command === "help") {
-    await telegram(env, "sendMessage", {
-      chat_id: env.ADMIN_GROUP_ID,
-      message_thread_id: message.message_thread_id,
-      text: t(env.BOT_LANGUAGE, "adminHelp")
     });
     return true;
   }

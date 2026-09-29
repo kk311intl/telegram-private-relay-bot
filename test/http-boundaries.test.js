@@ -121,8 +121,8 @@ test("指定群組中的非管理者訊息直接忽略", async () => {
 test("未設定管理群組時，管理者仍可使用 /start", async () => {
   const originalFetch = globalThis.fetch;
   let sentPayload;
-  globalThis.fetch = async (_url, init) => {
-    sentPayload = JSON.parse(init.body);
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith("/sendMessage")) sentPayload = JSON.parse(init.body);
     return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }), {
       status: 200,
       headers: { "content-type": "application/json" }
@@ -149,8 +149,8 @@ test("未設定管理群組時，管理者仍可使用 /start", async () => {
 test("管理者回覆依部署語言，不依 Telegram 使用者語言", async () => {
   const originalFetch = globalThis.fetch;
   const sent = [];
-  globalThis.fetch = async (_url, init) => {
-    sent.push(JSON.parse(init.body).text);
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith("/sendMessage")) sent.push(JSON.parse(init.body).text);
     return new Response(JSON.stringify({ ok: true, result: { message_id: 1 } }));
   };
   try {

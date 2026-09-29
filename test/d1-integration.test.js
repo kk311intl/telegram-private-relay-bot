@@ -79,6 +79,130 @@ function telegramResponse(result, status = 200) {
   });
 }
 
+test("管理者 /start 設定只對本人可見的模式專屬指令選單", async () => {
+  const originalFetch = globalThis.fetch;
+  const db = new TestD1();
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ method: String(url).split("/").pop(), payload: JSON.parse(init.body) });
+    return telegramResponse(true);
+  };
+  try {
+    await processUpdate({ message: {
+      message_id: 1, chat: { id: 1, type: "private" },
+      from: { id: 1, is_bot: false }, text: "/start"
+    } }, { BOT_TOKEN: "test-token", ADMIN_USER_ID: "1", ADMIN_GROUP_ID: "-1001", BOT_DB: db });
+    const menus = calls.filter((call) => call.method === "setMyCommands");
+    assert.equal(menus.length, 2);
+    assert.deepEqual(menus[0].payload.scope, { type: "chat", chat_id: "1" });
+    assert.deepEqual(menus[0].payload.commands.map((item) => item.command), ["start", "help", "status", "unblock"]);
+    assert.deepEqual(menus[1].payload.scope, { type: "chat_member", chat_id: "-1001", user_id: 1 });
+    assert.deepEqual(menus[1].payload.commands.map((item) => item.command),
+      ["help", "status", "user", "block", "unblock", "close"]);
+    calls.length = 0;
+    await processUpdate({ message: {
+      message_id: 2, chat: { id: 1, type: "private" },
+      from: { id: 1, is_bot: false }, text: "/start"
+    } }, { BOT_TOKEN: "test-token", ADMIN_USER_ID: "1", BOT_DB: db });
+    assert.deepEqual(calls.find((call) => call.method === "setMyCommands").payload.commands
+      .map((item) => item.command), ["start", "help", "status", "user", "block", "unblock"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    db.close();
+  }
+});
+
+test("管理者 /status 顯示近 24 小時更新與 Webhook 待處理數", async () => {
+  const originalFetch = globalThis.fetch;
+  const db = new TestD1();
+  const calls = [];
+  const now = Math.floor(Date.now() / 1000);
+  globalThis.fetch = async (url, init) => {
+    const method = String(url).split("/").pop();
+    calls.push({ method, payload: JSON.parse(init.body) });
+    return telegramResponse(method === "getWebhookInfo" ? { pending_update_count: 3 } : true);
+  };
+  try {
+    await db.prepare(`INSERT INTO processed_updates(update_id, processed_at, status, attempts, updated_at)
+      VALUES (1, ?, 'done', 1, ?), (2, ?, 'failed', 2, ?), (3, ?, 'discarded', 5, ?),
+        (4, ?, 'done', 1, ?)`)
+      .bind(now, now, now, now, now, now, now - 2 * 86400, now - 2 * 86400).run();
+    const env = { BOT_TOKEN: "test-token", ADMIN_USER_ID: "1", BOT_DB: db };
+    await processUpdate({ message: {
+      message_id: 5, chat: { id: 1, type: "private" },
+      from: { id: 1, is_bot: false }, text: "/status"
+    } }, env);
+    const text = calls.find((call) => call.method === "sendMessage").payload.text;
+    assert.match(text, /已完成: 1/);
+    assert.match(text, /等待重試: 1/);
+    assert.match(text, /已放棄: 1/);
+    assert.match(text, /待處理: 3/);
+    await processUpdate({ message: {
+      message_id: 6, chat: { id: -1001, type: "supergroup", is_forum: true },
+      from: { id: 99, is_bot: false }, message_thread_id: 77, text: "/status"
+    } }, { ...env, ADMIN_GROUP_ID: "-1001" });
+    assert.equal(calls.filter((call) => call.method === "getWebhookInfo").length, 1);
+    await processUpdate({ message: {
+      message_id: 7, chat: { id: -1001, type: "supergroup", is_forum: true },
+      from: { id: 1, is_bot: false }, text: "/status"
+    } }, { ...env, ADMIN_GROUP_ID: "-1001" });
+    assert.equal(calls.filter((call) => call.method === "getWebhookInfo").length, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    db.close();
+  }
+});
+
+test("/forget 需確認並清除路由資料，封鎖者保留最小封鎖紀錄", async () => {
+  const originalFetch = globalThis.fetch;
+  const db = new TestD1();
+  const sent = [];
+  globalThis.fetch = async (_url, init) => {
+    sent.push(JSON.parse(init.body));
+    return telegramResponse({ message_id: sent.length });
+  };
+  try {
+    for (const [id, blocked] of [["2", 0], ["3", 1]]) {
+      await db.prepare(`INSERT INTO users(user_id, username, first_name, blocked, topic_id,
+        created_at, updated_at) VALUES (?, 'old_name', 'Old Name', ?, ?, 1, 1)`)
+        .bind(id, blocked, Number(id) + 70).run();
+      await db.prepare(`INSERT INTO message_map(source_chat_id, source_message_id,
+        target_chat_id, target_message_id, user_id, created_at)
+        VALUES (?, 10, '-1001', ?, ?, 1)`).bind(id, Number(id) + 70, id).run();
+      await db.prepare(`INSERT INTO media_groups(source_chat_id, media_group_id, user_id,
+        direction, state, updated_at_ms, created_at)
+        VALUES (?, 'album', ?, 'user_to_admin', 'done', 1, 1)`).bind(id, id).run();
+      await db.prepare(`INSERT INTO media_group_messages(source_chat_id, media_group_id,
+        message_id, created_at) VALUES (?, 'album', 11, 1)`).bind(id).run();
+    }
+    const env = { BOT_TOKEN: "test-token", ADMIN_USER_ID: "1", BOT_DB: db };
+    await processUpdate({ message: userMessage(1, { text: "/forget" }) }, env);
+    assert.equal((await db.prepare("SELECT username FROM users WHERE user_id = '2'").first()).username, "old_name");
+    await processUpdate({ message: userMessage(2, { text: "/forget confirm" }) }, env);
+    await processUpdate({ message: userMessage(3, {
+      chat: { id: 3, type: "private" }, from: { id: 3, is_bot: false }, text: "/forget confirm"
+    }) }, env);
+    assert.equal(await db.prepare("SELECT * FROM users WHERE user_id = '2'").first(), null);
+    const blocked = await db.prepare("SELECT * FROM users WHERE user_id = '3'").first();
+    assert.equal(blocked.blocked, 1);
+    assert.equal(blocked.username, null);
+    assert.equal(blocked.first_name, "");
+    assert.equal(blocked.topic_id, null);
+    assert.match(sent.at(-1).text, /ID 和封鎖狀態/);
+    await processUpdate({ message: {
+      message_id: 4, chat: { id: 1, type: "private" },
+      from: { id: 1, is_bot: false }, text: "/unblock 3"
+    } }, env);
+    assert.equal(await db.prepare("SELECT * FROM users WHERE user_id = '3'").first(), null);
+    for (const table of ["message_map", "media_groups", "media_group_messages"]) {
+      assert.equal((await db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).first()).count, 0);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    db.close();
+  }
+});
+
 test("使用者歡迎訊息依部署語言，不依 Telegram 使用者語言", async () => {
   const originalFetch = globalThis.fetch;
   const db = new TestD1();
