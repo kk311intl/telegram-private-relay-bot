@@ -2,13 +2,13 @@
 
 [中文](#zh) · [日本語](#ja) · [English](#en)
 
-Version: v1.2.1 · License: [GPL-3.0-only](LICENSE)
+Version: v1.2.2 · License: [GPL-3.0-only](LICENSE)
 
 <a id="zh"></a>
 
 ## 中文
 
-**免自管伺服器：** 部署在 Cloudflare Workers 與 D1，Webhook 收件和回覆由 Worker 處理；無需自架或維護常駐主機。仍需 Cloudflare 帳號、Telegram Bot Token，以及管理群組或管理者 ID。
+**免自管伺服器：** 部署在 Cloudflare Workers 與 D1，Webhook 收件和回覆由 Worker 處理；無需自架或維護常駐主機。仍需 Cloudflare 帳號、Telegram Bot Token 和管理者 ID；Topic 模式另需管理群組。
 
 ### AI 部署提示詞
 
@@ -52,7 +52,7 @@ Copy-Item wrangler.jsonc.example wrangler.jsonc
 ./tools/Invoke-WithCloudflareToken.ps1 deploy --keep-vars --config wrangler.jsonc
 ```
 
-Cloudflare API Token 需要 Workers Scripts Edit 和 D1 Edit 權限。加密副本只留在本機 `private-credentials/`。`wrangler.jsonc` 已被忽略；`keep_vars` 讓後續部署保留 Cloudflare 控制台中的設定。
+Cloudflare API Token 需要 Workers Scripts Edit 和 D1 Edit 權限。加密副本只留在本機 `private-credentials/`；已有副本時，保存腳本預設不覆寫，明確更新才加 `-Force`。`wrangler.jsonc` 已被忽略；`keep_vars` 讓後續部署保留 Cloudflare 控制台中的設定。
 
 在 Cloudflare Worker 的 Variables and Secrets 設定：
 
@@ -103,7 +103,7 @@ Invoke-RestMethod 'https://YOUR_WORKER.workers.dev/ready'
 
 ## 日本語
 
-**自前サーバー不要：** Cloudflare Workers と D1 にデプロイし、Webhook の受信と返信を Worker が処理します。常時稼働するサーバーの構築・保守は不要です。Cloudflare アカウント、Telegram Bot Token、および管理グループまたは管理者 ID は必要です。
+**自前サーバー不要：** Cloudflare Workers と D1 にデプロイし、Webhook の受信と返信を Worker が処理します。常時稼働するサーバーの構築・保守は不要です。Cloudflare アカウント、Telegram Bot Token、管理者 ID は必須で、トピックモードでは管理グループも必要です。
 
 ### AI デプロイ用プロンプト
 
@@ -147,7 +147,7 @@ Copy-Item wrangler.jsonc.example wrangler.jsonc
 ./tools/Invoke-WithCloudflareToken.ps1 deploy --keep-vars --config wrangler.jsonc
 ```
 
-Cloudflare API Token には Workers Scripts Edit と D1 Edit が必要です。暗号化されたローカルコピーは `private-credentials/` に保存します。`wrangler.jsonc` は Git の対象外で、`keep_vars` により次回のデプロイでも Cloudflare 側の設定が保持されます。
+Cloudflare API Token には Workers Scripts Edit と D1 Edit が必要です。暗号化されたローカルコピーは `private-credentials/` に保存します。既存のコピーは保存スクリプトで上書きされません。明示的に更新する場合のみ `-Force` を指定してください。`wrangler.jsonc` は Git の対象外で、`keep_vars` により次回のデプロイでも Cloudflare 側の設定が保持されます。
 
 Cloudflare Worker の Variables and Secrets に次を設定します。
 
@@ -198,7 +198,7 @@ Invoke-RestMethod 'https://YOUR_WORKER.workers.dev/ready'
 
 ## English
 
-**No server to maintain:** Deploy on Cloudflare Workers and D1. The Worker receives webhooks and handles replies, so no always-on server is needed. You still need a Cloudflare account, a Telegram Bot Token, and an admin group or admin ID.
+**No server to maintain:** Deploy on Cloudflare Workers and D1. The Worker receives webhooks and handles replies, so no always-on server is needed. You still need a Cloudflare account, a Telegram Bot Token, and an admin ID; topic mode also needs an admin group.
 
 ### AI deployment prompt
 
@@ -242,7 +242,7 @@ For a new Bot, before registering its webhook, send `/id` in a private chat with
 ./tools/Invoke-WithCloudflareToken.ps1 deploy --keep-vars --config wrangler.jsonc
 ```
 
-The Cloudflare API Token needs Workers Scripts Edit and D1 Edit. Its encrypted local copy stays under `private-credentials/`. Git ignores `wrangler.jsonc`; `keep_vars` preserves settings made in the Cloudflare dashboard on later deployments.
+The Cloudflare API Token needs Workers Scripts Edit and D1 Edit. Its encrypted local copy stays under `private-credentials/`. The save script will not overwrite an existing copy unless you explicitly use `-Force`. Git ignores `wrangler.jsonc`; `keep_vars` preserves settings made in the Cloudflare dashboard on later deployments.
 
 Set these under the Worker's Variables and Secrets in Cloudflare:
 

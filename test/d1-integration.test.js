@@ -177,6 +177,52 @@ test("相簿聚合後只呼叫一次 copyMessages 並保存每則映射", async 
   }
 });
 
+test("逾期的相簿處理 lease 可由重試接手", async () => {
+  const originalFetch = globalThis.fetch;
+  const db = new TestD1();
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    const method = String(url).split("/").pop();
+    const payload = JSON.parse(init.body);
+    calls.push({ method, payload });
+    if (method === "createForumTopic") return telegramResponse({ message_thread_id: 77 });
+    if (method === "copyMessages") {
+      return telegramResponse(payload.message_ids.map(() => ({ message_id: 501 })));
+    }
+    return telegramResponse({ message_id: 50 });
+  };
+  const env = {
+    BOT_TOKEN: "test-token",
+    ADMIN_USER_ID: "1",
+    ADMIN_GROUP_ID: "-1001",
+    BOT_DB: db
+  };
+  try {
+    const now = Math.floor(Date.now() / 1000);
+    await db.prepare("INSERT INTO users(user_id, first_name, created_at, updated_at) VALUES (?, ?, ?, ?)")
+      .bind("2", "測試者", now, now).run();
+    await db.prepare(`
+      INSERT INTO media_groups(source_chat_id, media_group_id, user_id, direction, state,
+        updated_at_ms, lease_until_ms, created_at)
+      VALUES (?, ?, ?, 'user_to_admin', 'processing', ?, ?, ?)
+    `).bind("2", "expired-album", "2", Date.now() - 10_000, Date.now() - 1_000, now).run();
+    await db.prepare(`
+      INSERT INTO media_group_messages(source_chat_id, media_group_id, message_id, created_at)
+      VALUES (?, ?, ?, ?)
+    `).bind("2", "expired-album", 120, now).run();
+
+    await processUpdate({ message: userMessage(120, { media_group_id: "expired-album", photo: [{}] }) }, env);
+
+    assert.equal(calls.filter((call) => call.method === "copyMessages").length, 1);
+    assert.equal((await db.prepare("SELECT state FROM media_groups WHERE media_group_id = ?")
+      .bind("expired-album").first()).state, "done");
+    assert.equal((await db.prepare("SELECT COUNT(*) AS count FROM message_map").first()).count, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    db.close();
+  }
+});
+
 test("同使用者併發訊息只建立一個 Topic", async () => {
   const originalFetch = globalThis.fetch;
   const db = new TestD1();

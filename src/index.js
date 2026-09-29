@@ -51,7 +51,8 @@ export default {
       return new Response("Bad request", { status: 400 });
     }
 
-    if (!Number.isSafeInteger(update.update_id)) {
+    if (!update || typeof update !== "object" || Array.isArray(update)
+      || !Number.isSafeInteger(update.update_id)) {
       return new Response("Bad request", { status: 400 });
     }
 
@@ -656,6 +657,8 @@ async function enqueueMediaMessage(message, userId, direction, env, now, interva
   for (let attempt = 0; attempt < 20; attempt += 1) {
     const group = await getMediaGroup(env.BOT_DB, sourceChatId, mediaGroupId);
     if (group?.state === "processing") {
+      // Expired work is reclaimed by flushMediaGroup below.
+      if (Number(group.lease_until_ms) <= Date.now()) return { created: false };
       await delay(100);
       continue;
     }

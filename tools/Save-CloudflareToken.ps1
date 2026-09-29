@@ -1,11 +1,16 @@
 #requires -Version 7.0
 [CmdletBinding()]
-param()
+param(
+    [switch]$Force
+)
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $privateDir = Join-Path $projectRoot 'private-credentials'
 $tokenFile = Join-Path $privateDir 'cloudflare-token.dpapi'
+if ((Test-Path -LiteralPath $tokenFile) -and -not $Force) {
+    throw '本機已有 Cloudflare Token；若確定要更新，請使用 -Force。'
+}
 
 $secureToken = Read-Host '輸入 Cloudflare API Token（不會顯示）' -AsSecureString
 $encrypted = ConvertFrom-SecureString -SecureString $secureToken

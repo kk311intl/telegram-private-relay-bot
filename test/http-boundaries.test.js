@@ -49,6 +49,23 @@ test("Webhook Secret 錯誤時不接觸資料庫", async () => {
   assert.equal(touchedDatabase, false);
 });
 
+test("已授權 Webhook 拒絕非物件 JSON", async () => {
+  const env = {
+    BOT_TOKEN: "bot-token",
+    WEBHOOK_SECRET: "correct-secret",
+    ADMIN_USER_ID: "1",
+    BOT_DB: { prepare() { throw new Error("不應接觸資料庫"); } }
+  };
+  for (const body of ["null", "[]"]) {
+    const response = await worker.fetch(new Request("https://example.test/webhook", {
+      method: "POST",
+      headers: { "X-Telegram-Bot-Api-Secret-Token": env.WEBHOOK_SECRET },
+      body
+    }), env, context);
+    assert.equal(response.status, 400);
+  }
+});
+
 test("ready 不洩漏缺少的設定名稱", async () => {
   const response = await worker.fetch(new Request("https://example.test/ready"), {}, context);
   assert.equal(response.status, 503);
