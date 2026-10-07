@@ -65,7 +65,7 @@ export default {
       if (claim.status === "busy") return json({ ok: false, busy: true }, { status: 500 });
       leaseToken = claim.token;
       await processUpdate(update, { ...env, _updateLease: { id: update.update_id, token: leaseToken } });
-      const finished = await finishUpdate(env.BOT_DB, update.update_id, "done", leaseToken);
+      const finished = await finishUpdate(env.BOT_DB, update.update_id, leaseToken);
       if (Number(finished.meta?.changes || 0) !== 1) {
         const current = await env.BOT_DB.prepare("SELECT status FROM processed_updates WHERE update_id = ?")
           .bind(update.update_id).first();
@@ -328,15 +328,16 @@ async function processUserMessage(message, env) {
     String(env.ADMIN_GROUP_ID)
   );
 
+  const copyParameters = {
+    chat_id: env.ADMIN_GROUP_ID,
+    from_chat_id: message.chat.id,
+    message_id: message.message_id,
+    message_thread_id: user.topic_id,
+    reply_parameters: replyParameters
+  };
   let copied;
   try {
-    copied = await telegram(env, "copyMessage", {
-      chat_id: env.ADMIN_GROUP_ID,
-      from_chat_id: message.chat.id,
-      message_id: message.message_id,
-      message_thread_id: user.topic_id,
-      reply_parameters: replyParameters
-    });
+    copied = await telegram(env, "copyMessage", copyParameters);
   } catch (error) {
     if (!isTopicMissing(error)) {
       await notifyUserCopyFailure(message.chat.id, error, env);
@@ -344,23 +345,11 @@ async function processUserMessage(message, env) {
     }
     await clearUserTopic(env.BOT_DB, user.user_id, user.topic_id);
     user = await ensureUserTopic({ ...user, topic_id: null }, message.from, env);
-    copied = await telegram(env, "copyMessage", {
-      chat_id: env.ADMIN_GROUP_ID,
-      from_chat_id: message.chat.id,
-      message_id: message.message_id,
-      message_thread_id: user.topic_id,
-      reply_parameters: replyParameters
-    });
+    copyParameters.message_thread_id = user.topic_id;
+    copied = await telegram(env, "copyMessage", copyParameters);
   }
 
-  await saveCopiedMappings(env, user, [{
-    sourceChatId: String(message.chat.id),
-    sourceMessageId: message.message_id,
-    targetChatId: String(env.ADMIN_GROUP_ID),
-    targetMessageId: copied.message_id,
-    userId,
-    now
-  }]);
+  await saveCopiedMessage(env, user, message, copied, env.ADMIN_GROUP_ID, now);
 }
 
 async function forgetUser(db, userId, messageId, now) {
@@ -422,14 +411,7 @@ export async function relayUserMessageToAdmin(message, user, env, now) {
     throw error;
   }
 
-  await saveCopiedMappings(env, user, [{
-    sourceChatId: String(message.chat.id),
-    sourceMessageId: message.message_id,
-    targetChatId: String(env.ADMIN_USER_ID),
-    targetMessageId: copied.message_id,
-    userId: user.user_id,
-    now
-  }]);
+  await saveCopiedMessage(env, user, message, copied, env.ADMIN_USER_ID, now);
 }
 
 export async function processDirectAdminReply(message, env) {
@@ -460,28 +442,8 @@ export async function processDirectAdminReply(message, env) {
   if (!user || user.erased) return;
 
   const command = parseCommand(message.text);
-  if (command === "block" || command === "unblock") {
-    const blocked = command === "block" ? 1 : 0;
-    await env.BOT_DB.prepare(
-      "UPDATE users SET blocked = ?, blocked_notice_at = 0, updated_at = ? WHERE user_id = ?"
-    ).bind(blocked, Math.floor(Date.now() / 1000), user.user_id).run();
-    await telegram(env, "sendMessage", {
-      chat_id: env.ADMIN_USER_ID,
-      text: t(env.BOT_LANGUAGE, blocked ? "blocked" : "unblocked")
-    });
-    return;
-  }
-
-  if (command === "user") {
-    await telegram(env, "sendMessage", {
-      chat_id: env.ADMIN_USER_ID,
-      text: buildDirectUserStatus(user, env.BOT_LANGUAGE),
-      parse_mode: "HTML"
-    });
-    return;
-  }
-
   if (command) {
+    if (await handleAdminCommand(command, message, user, env)) return;
     await sendUnknownCommand(message.chat.id, undefined, env);
     return;
   }
@@ -517,14 +479,7 @@ export async function processDirectAdminReply(message, env) {
     await notifyAdminDeliveryFailure(message, error, env);
     throw error;
   }
-  await saveCopiedMappings(env, user, [{
-    sourceChatId: String(env.ADMIN_USER_ID),
-    sourceMessageId: message.message_id,
-    targetChatId: user.user_id,
-    targetMessageId: copied.message_id,
-    userId: user.user_id,
-    now: Math.floor(Date.now() / 1000)
-  }]);
+  await saveCopiedMessage(env, user, message, copied, user.user_id, Math.floor(Date.now() / 1000));
 }
 
 function buildDirectUserStatus(user, language) {
@@ -599,19 +554,20 @@ async function processAdminTopicMessage(message, env) {
     throw error;
   }
 
-  await saveCopiedMappings(env, user, [{
-    sourceChatId: String(env.ADMIN_GROUP_ID),
-    sourceMessageId: message.message_id,
-    targetChatId: user.user_id,
-    targetMessageId: copied.message_id,
-    userId: user.user_id,
-    now: Math.floor(Date.now() / 1000)
-  }]);
+  await saveCopiedMessage(env, user, message, copied, user.user_id, Math.floor(Date.now() / 1000));
 }
 
 async function handleAdminCommand(command, message, user, env) {
+  const isTopic = String(message.chat.id) === String(env.ADMIN_GROUP_ID);
+  const target = isTopic
+    ? { chat_id: env.ADMIN_GROUP_ID, message_thread_id: message.message_thread_id }
+    : { chat_id: env.ADMIN_USER_ID };
   if (command === "user") {
-    await sendTopicStatus(message, user, env);
+    await telegram(env, "sendMessage", {
+      ...target,
+      text: buildDirectUserStatus(user, env.BOT_LANGUAGE),
+      parse_mode: "HTML"
+    });
     return true;
   }
   if (command === "block" || command === "unblock") {
@@ -620,17 +576,13 @@ async function handleAdminCommand(command, message, user, env) {
       "UPDATE users SET blocked = ?, blocked_notice_at = 0, updated_at = ? WHERE user_id = ?"
     ).bind(blocked, Math.floor(Date.now() / 1000), user.user_id).run();
     await telegram(env, "sendMessage", {
-      chat_id: env.ADMIN_GROUP_ID,
-      message_thread_id: message.message_thread_id,
+      ...target,
       text: t(env.BOT_LANGUAGE, blocked ? "blocked" : "unblocked")
     });
     return true;
   }
-  if (command === "close") {
-    await telegram(env, "closeForumTopic", {
-      chat_id: env.ADMIN_GROUP_ID,
-      message_thread_id: message.message_thread_id
-    });
+  if (command === "close" && isTopic) {
+    await telegram(env, "closeForumTopic", target);
     return true;
   }
   return false;
@@ -760,15 +712,6 @@ async function saveTopicCardMessage(db, user, topicId, messageId) {
     WHERE user_id = ? AND generation = ? AND erased = 0 AND topic_id = ?
   `).bind(messageId, Math.floor(Date.now() / 1000), user.user_id, user.generation, topicId).run();
   if (Number(result.meta?.changes || 0) !== 1) throw new ObsoleteWorkError();
-}
-
-async function sendTopicStatus(message, user, env) {
-  await telegram(env, "sendMessage", {
-    chat_id: env.ADMIN_GROUP_ID,
-    message_thread_id: message.message_thread_id,
-    text: buildDirectUserStatus(user, env.BOT_LANGUAGE),
-    parse_mode: "HTML"
-  });
 }
 
 async function enqueueMediaMessage(message, user, direction, env, now, interval) {
@@ -954,25 +897,22 @@ async function deliverMediaGroup(group, env) {
     }
   }
 
+  const copyParameters = {
+    chat_id: targetChatId,
+    from_chat_id: group.source_chat_id,
+    message_ids: messageIds,
+    message_thread_id: topicId
+  };
   let copied;
   try {
-    copied = await telegram(env, "copyMessages", {
-      chat_id: targetChatId,
-      from_chat_id: group.source_chat_id,
-      message_ids: messageIds,
-      message_thread_id: topicId
-    });
+    copied = await telegram(env, "copyMessages", copyParameters);
   } catch (error) {
     if (group.direction !== "user_to_admin" || !topicId || !isTopicMissing(error)) throw error;
     await clearUserTopic(env.BOT_DB, user.user_id, topicId);
     const topicUser = await ensureUserTopic({ ...user, topic_id: null }, user, env);
-    copied = await telegram(env, "copyMessages", {
-      chat_id: env.ADMIN_GROUP_ID,
-      from_chat_id: group.source_chat_id,
-      message_ids: messageIds,
-      message_thread_id: topicUser.topic_id
-    });
-    targetChatId = String(env.ADMIN_GROUP_ID);
+    copyParameters.chat_id = env.ADMIN_GROUP_ID;
+    copyParameters.message_thread_id = topicUser.topic_id;
+    copied = await telegram(env, "copyMessages", copyParameters);
   }
 
   if (!Array.isArray(copied) || copied.length !== messageIds.length) {
@@ -1198,11 +1138,11 @@ async function claimUpdate(db, updateId) {
   return { status: current?.status === "processing" ? "busy" : "duplicate" };
 }
 
-async function finishUpdate(db, updateId, status, token) {
+async function finishUpdate(db, updateId, token) {
   return db.prepare(`
-    UPDATE processed_updates SET status = ?, updated_at = ?, last_error = NULL
+    UPDATE processed_updates SET status = 'done', updated_at = ?, last_error = NULL
     WHERE update_id = ? AND lease_token = ? AND status = 'processing'
-  `).bind(status, Math.floor(Date.now() / 1000), updateId, token).run();
+  `).bind(Math.floor(Date.now() / 1000), updateId, token).run();
 }
 
 async function recordUpdateFailure(db, updateId, retryable, error, token) {
@@ -1310,6 +1250,17 @@ async function requireCurrentUser(db, user, checkBlocked = false) {
   if (!current || current.erased || current.generation !== user.generation || (checkBlocked && current.blocked)) {
     throw new ObsoleteWorkError();
   }
+}
+
+function saveCopiedMessage(env, user, message, copied, targetChatId, now) {
+  return saveCopiedMappings(env, user, [{
+    sourceChatId: String(message.chat.id),
+    sourceMessageId: message.message_id,
+    targetChatId: String(targetChatId),
+    targetMessageId: copied.message_id,
+    userId: user.user_id,
+    now
+  }]);
 }
 
 async function saveCopiedMappings(env, user, values) {

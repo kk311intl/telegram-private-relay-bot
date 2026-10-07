@@ -16,7 +16,6 @@ $secureToken = ConvertTo-SecureString ((Get-Content -Raw -LiteralPath $tokenFile
 $credential = [PSCredential]::new('cloudflare', $secureToken)
 $plainToken = $credential.GetNetworkCredential().Password
 $oldToken = [Environment]::GetEnvironmentVariable('CLOUDFLARE_API_TOKEN', 'Process')
-$oldPath = [Environment]::GetEnvironmentVariable('PATH', 'Process')
 try {
     [Environment]::SetEnvironmentVariable('CLOUDFLARE_API_TOKEN', $plainToken, 'Process')
     if (-not (Get-Command node.exe -ErrorAction SilentlyContinue)) {
@@ -35,7 +34,6 @@ try {
     }
 } finally {
     [Environment]::SetEnvironmentVariable('CLOUDFLARE_API_TOKEN', $oldToken, 'Process')
-    [Environment]::SetEnvironmentVariable('PATH', $oldPath, 'Process')
     $plainToken = $null
     $credential = $null
     $secureToken = $null
