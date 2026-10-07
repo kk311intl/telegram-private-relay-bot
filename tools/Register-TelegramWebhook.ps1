@@ -10,8 +10,10 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $savedSecretPath = Join-Path $projectRoot 'private-credentials/telegram-webhook-secret.dpapi'
 $resolvedWorkerUrl = [Uri]$WorkerUrl
-if ($resolvedWorkerUrl.Scheme -ne 'https' -or -not $resolvedWorkerUrl.Host) {
-    throw 'WorkerUrl 必須是有效的 HTTPS 網址。'
+if ($resolvedWorkerUrl.Scheme -ne 'https' -or -not $resolvedWorkerUrl.Host -or
+    $resolvedWorkerUrl.UserInfo -or $resolvedWorkerUrl.Query -or $resolvedWorkerUrl.Fragment -or
+    $resolvedWorkerUrl.AbsolutePath -ne '/') {
+    throw 'WorkerUrl 必須是沒有路徑、帳密、查詢參數或片段的 HTTPS 網站根網址。'
 }
 if (-not (Test-Path -LiteralPath $savedSecretPath)) {
     throw '找不到本機保存的 WEBHOOK_SECRET。先執行 tools/New-WebhookSecret.ps1。'

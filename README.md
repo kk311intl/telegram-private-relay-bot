@@ -2,7 +2,7 @@
 
 [中文](#zh) · [日本語](#ja) · [English](#en)
 
-Version: v1.2.2 · License: [GPL-3.0-only](LICENSE)
+Version: v1.3.0 · License: [GPL-3.0-only](LICENSE)
 
 <a id="zh"></a>
 
@@ -20,7 +20,7 @@ Version: v1.2.2 · License: [GPL-3.0-only](LICENSE)
 >
 > 依 README 與現有 `tools/` 腳本完成依賴安裝、測試、複製受 Git 忽略的 `wrangler.jsonc`、安全取得我的數字 `ADMIN_USER_ID`（Topic 模式也取得 `ADMIN_GROUP_ID`）、設定 Worker／D1／`vars.BOT_LANGUAGE`、建立或沿用 D1、套用 migrations、設定 Cloudflare Secrets／Variables、部署 Worker、註冊 Telegram Webhook。每一步請先說明我需做的唯一操作，完成後自行核對結果再進下一步；不要讓我手寫程式或自行猜設定值。Bot Token、Cloudflare Token、Webhook Secret 只能透過本機安全輸入或 Cloudflare Secret 欄位處理，不要請我貼進聊天、終端輸出、Git 或公開檔案；不要刪除或輪替既有憑證，除非我明確要求。
 >
-> 最後實際檢查 `/health`、`/ready`、Webhook 狀態和專案提供的安全 runtime probe，並引導我用非管理者 Telegram 帳號完成「私聊 → 管理端收到 → 回覆 → 使用者收到」測試。若環境或權限阻止某一步，說清楚阻礙與我需要做的下一個動作；不要宣稱未驗證的步驟已完成。成功後用白話列出 Bot 連結、Worker 網址、選定語言、部署模式、檢查結果與需要我保管的憑證位置，不顯示秘密值。
+> 最後實際檢查 `/health`、`/ready`、Webhook 狀態和專案提供的安全 runtime probe，並引導我用非管理者 Telegram 帳號完成「私聊 → 管理端收到 → 回覆 → 使用者收到」測試。由管理者私聊 Bot 傳 `/start` 設定指令選單，再用 `/status` 查看狀態；資料清除只用測試帳號驗證。若環境或權限阻止某一步，說清楚阻礙與我需要做的下一個動作；不要宣稱未驗證的步驟已完成。成功後用白話列出 Bot 連結、Worker 網址、選定語言、部署模式、檢查結果與需要我保管的憑證位置，不顯示秘密值。
 
 這個 Bot 把 Telegram 私聊轉送到管理超級群組中每位使用者專屬的 Topic，管理者可直接回覆。未設定管理群組時，改用管理者私聊作為備用模式。以 Cloudflare Worker、D1 和 Telegram Webhook 運作；不儲存訊息文字或媒體內容。
 
@@ -86,7 +86,9 @@ Set-Clipboard $null
 
 使用者私聊 Bot；Topic 模式由管理者在對應 Topic 回覆，私聊模式則須直接回覆 Bot 轉來的訊息。支援文字、一般媒體、相簿和編輯同步；Telegram 不允許複製的訊息類型無法轉送。使用者可用 `/start`、`/id`。Topic 模式的管理者可在 Topic 使用 `/user`、`/block`、`/unblock`、`/close`、`/help`；私聊模式須回覆對應訊息才能使用 `/user`、`/block`、`/unblock`。管理者可直接私聊 Bot 傳 `/status` 查看近 24 小時的處理狀態與 Webhook 待處理數；Topic 模式也可在管理群組的 Topic 使用。管理者私聊 Bot 傳 `/start` 會設定只有本人可見、依部署模式區分的 Telegram 指令選單；`/close` 僅適用於 Topic。
 
-使用者傳 `/forget` 會先看到確認說明，只有傳 `/forget confirm` 才清除 Bot 的 D1 個人資料、相簿暫存及轉送對照。若使用者被封鎖，仍保留 ID 與封鎖狀態，避免清除指令繞過封鎖；管理者可在 Bot 私聊傳 `/unblock 使用者ID` 解封。這**不會刪除 Telegram 兩端已有的聊天訊息或既有備份**；之後再傳訊可能重新建立資料。`/status` 是運行狀態摘要，不能替代真人收發測試。
+使用者傳 `/forget` 會先看到確認說明，只有傳 `/forget confirm` 才清除 Bot 的 D1 個人資料、相簿暫存及轉送對照。為防止舊請求重建資料，Bot 暫留不含姓名的控制紀錄；非封鎖者的紀錄會在 7 天後依排程清理。被封鎖者的 ID、封鎖狀態與控制紀錄仍保留，管理者可在 Bot 私聊傳 `/unblock 使用者ID` 解封。這**不會刪除 Telegram 兩端已有的聊天訊息或既有備份**；之後的新訊息可能重新建立資料。`/status` 也顯示處理中及逾期租約，但不能替代真人收發測試。
+
+編輯同步限文字與媒體說明，不含替換媒體。若 Telegram 已執行轉送卻沒有返回結果，仍可能在重試時重複送達；先核對兩端再決定重送。保存對照失敗時，Bot 會先重試保存，再嘗試撤回副本；兩者都失敗則停止自動重送並提示發送者。
 
 ```powershell
 Invoke-RestMethod 'https://YOUR_WORKER.workers.dev/health'
@@ -95,7 +97,7 @@ Invoke-RestMethod 'https://YOUR_WORKER.workers.dev/ready'
 ./tools/Test-WorkerRuntime.ps1 -WorkerUrl 'https://YOUR_WORKER.workers.dev'
 ```
 
-`/ready` 檢查設定與 D1，不檢查 Telegram 權限。正式環境探針會送安全的測試更新並清除其 D1 紀錄，但不會驗證 Telegram 實際收發；仍須用非管理者帳號實測「私聊 → 管理端收到 → 管理者回覆 → 使用者收到」。若使用自訂設定檔，探針也須加上 `-Config '你的設定檔路徑'`，以清理正確的 D1。
+`/ready` 檢查設定與 D1 結構，不檢查 Telegram 權限。正式環境探針會送安全的測試更新並清除其 D1 紀錄，但不會驗證 Telegram 實際收發；仍須用非管理者帳號實測「私聊 → 管理端收到 → 管理者回覆 → 使用者收到」。若使用自訂設定檔，探針也須加上 `-Config '你的設定檔路徑'`，以清理正確的 D1。
 
 ### 授權
 
@@ -117,7 +119,7 @@ repository のリンクとこのプロンプトを、ファイルを読みター
 >
 > README と既存の `tools/` スクリプトに従い、依存関係のインストール、テスト、Git の対象外である `wrangler.jsonc` の作成、私の数字の `ADMIN_USER_ID`（トピックモードでは `ADMIN_GROUP_ID` も）の安全な確認、Worker／D1／`vars.BOT_LANGUAGE` の設定、D1 の新規作成または再利用、migrations の適用、Cloudflare Secrets／Variables の設定、Worker のデプロイ、Telegram Webhook の登録まで進めてください。各段階で私が行う必要のある操作を一つだけ説明し、結果を確認してから次に進んでください。私にコードを書かせたり設定値を推測させたりしないでください。Bot Token、Cloudflare Token、Webhook Secret はローカルの安全な入力または Cloudflare の Secret 欄だけで扱い、チャット、コマンド出力、Git、公開ファイルに貼るよう求めないでください。明示的な依頼なしに既存の認証情報を削除・更新しないでください。
 >
-> 最後に `/health`、`/ready`、Webhook の状態、プロジェクトの安全な runtime probe を実際に確認し、管理者以外の Telegram アカウントで「私信 → 管理側への到着 → 返信 → ユーザーへの到着」を私が試せるよう案内してください。環境や権限で止まったら理由と私が次に行う操作を明確にし、未確認の項目を完了と報告しないでください。成功時は Bot のリンク、Worker URL、選んだ言語、運用モード、検証結果、保管すべき認証情報の場所を平易にまとめ、秘密の値は表示しないでください。
+> 最後に `/health`、`/ready`、Webhook の状態、プロジェクトの安全な runtime probe を実際に確認し、管理者以外の Telegram アカウントで「私信 → 管理側への到着 → 返信 → ユーザーへの到着」を私が試せるよう案内してください。管理者が Bot との私信で `/start` を送ってコマンドメニューを設定し、`/status` で状態を確認してください。消去機能はテスト用アカウントだけで検証してください。環境や権限で止まったら理由と私が次に行う操作を明確にし、未確認の項目を完了と報告しないでください。成功時は Bot のリンク、Worker URL、選んだ言語、運用モード、検証結果、保管すべき認証情報の場所を平易にまとめ、秘密の値は表示しないでください。
 
 Telegram の私信を、管理用スーパーグループ内のユーザー別トピックへ転送する Bot です。管理者はトピックから返信できます。管理グループを設定しない場合は管理者への私信を使います。Cloudflare Worker、D1、Telegram Webhook で動作し、メッセージ本文やメディア本体は保存しません。
 
@@ -183,7 +185,9 @@ Set-Clipboard $null
 
 ユーザーは Bot に私信を送ります。トピックモードでは管理者が該当トピックで返信し、私信モードでは Bot から転送されたメッセージに返信します。テキスト、通常のメディア、アルバム、編集の同期に対応します。Telegram がコピーを許可しない種類のメッセージは転送できません。ユーザー用コマンドは `/start`、`/id` です。トピックモードでは管理者がトピック内で `/user`、`/block`、`/unblock`、`/close`、`/help` を使えます。私信モードでは対象メッセージへの返信で `/user`、`/block`、`/unblock` を使います。管理者は Bot との私信で `/status` を送ると過去24時間の処理状況と Webhook の保留件数を確認できます。トピックモードでは管理グループのトピック内でも使えます。管理者が Bot との私信で `/start` を送ると、本人だけに表示されるモード別の Telegram コマンドメニューが設定されます。`/close` はトピック専用です。
 
-ユーザーが `/forget` を送ると確認方法が表示され、`/forget confirm` を送った場合にのみ Bot の D1 に保存された個人情報、アルバムの一時データ、転送対応が消去されます。ブロック中の場合は、ブロックを回避できないよう ID とブロック状態だけが残り、管理者は Bot との私信で `/unblock ユーザーID` を送って解除できます。**Telegram の両側に既にあるチャットメッセージと既存のバックアップは削除されません**。再送信すると情報が作成される場合があります。`/status` は稼働状況の要約であり、実際の送受信テストの代わりにはなりません。
+ユーザーが `/forget` を送ると確認方法が表示され、`/forget confirm` を送った場合にのみ Bot の D1 に保存された個人情報、アルバムの一時データ、転送対応が消去されます。氏名を含まない再作成防止の制御記録を一時保持し、ブロックされていないユーザーの記録は7日後の定期処理で削除します。ブロック中の ID、ブロック状態、制御記録は残り、管理者は Bot との私信で `/unblock ユーザーID` を送って解除できます。**Telegram の既存メッセージとバックアップは削除されません**。以後の新しいメッセージは情報を再作成する場合があります。`/status` は処理中の更新と期限切れリースも表示しますが、実際の送受信テストの代わりにはなりません。
+
+編集の同期はテキストとキャプションのみで、メディアの置換には対応しません。Telegram が転送を実行した後に応答が失われると、再試行で重複する可能性があります。再送前に両側を確認してください。転送対応の保存に失敗すると保存を再試行し、その後コピーの取り消しを試みます。どちらも失敗した場合は自動再送を停止し、送信者に通知します。
 
 ```powershell
 Invoke-RestMethod 'https://YOUR_WORKER.workers.dev/health'
@@ -192,7 +196,7 @@ Invoke-RestMethod 'https://YOUR_WORKER.workers.dev/ready'
 ./tools/Test-WorkerRuntime.ps1 -WorkerUrl 'https://YOUR_WORKER.workers.dev'
 ```
 
-`/ready` は設定と D1 を確認しますが、Telegram 側の権限は確認しません。運用テストは安全な更新を送信して D1 のテスト行を消去しますが、Telegram での実際の送受信は検証しません。最後に管理者以外のアカウントで「私信 → 管理側への到着 → 管理者の返信 → ユーザーへの到着」を確認してください。独自の設定ファイルを使う場合は、テストにも `-Config '設定ファイルのパス'` を指定し、正しい D1 のテスト行を消去してください。
+`/ready` は設定と D1 の構造を確認しますが、Telegram 側の権限は確認しません。運用テストは安全な更新を送信して D1 のテスト行を消去しますが、Telegram での実際の送受信は検証しません。最後に管理者以外のアカウントで「私信 → 管理側への到着 → 管理者の返信 → ユーザーへの到着」を確認してください。独自の設定ファイルを使う場合は、テストにも `-Config '設定ファイルのパス'` を指定し、正しい D1 のテスト行を消去してください。
 
 ### ライセンス
 
@@ -214,7 +218,7 @@ Give the repository link and this prompt to an AI coding agent that can read fil
 >
 > Follow the README and existing `tools/` scripts to install dependencies, run checks, create the Git-ignored `wrangler.jsonc`, safely obtain my numeric `ADMIN_USER_ID` (and `ADMIN_GROUP_ID` for topic mode), set the Worker, D1, and `vars.BOT_LANGUAGE`, create or reuse D1, apply migrations, set Cloudflare Secrets and Variables, deploy the Worker, and register the Telegram webhook. At each stage, tell me the one action I must perform, verify the result yourself, and continue. Do not ask me to write code or guess configuration values. Handle Bot, Cloudflare, and webhook tokens only through secure local prompts or Cloudflare Secret fields; never ask me to paste them into chat, terminal output, Git, or public files. Do not delete or rotate existing credentials without my explicit request.
 >
-> Finally, actually check `/health`, `/ready`, the webhook status, and the project's safe runtime probe. Guide me through a real test with a non-admin Telegram account: private message → admin receives it → admin replies → user receives the reply. If access or permissions block a step, state exactly what is blocked and the single next action I need to take; never report unverified work as complete. When finished, summarize the Bot link, Worker URL, chosen language, admin mode, verification results, and where I should retain credentials, without displaying secret values.
+> Finally, actually check `/health`, `/ready`, the webhook status, and the project's safe runtime probe. Guide me through a real test with a non-admin Telegram account: private message → admin receives it → admin replies → user receives the reply. Have the admin send `/start` privately to set the command menu and use `/status` to check processing. Test data erasure only with a test account. If access or permissions block a step, state exactly what is blocked and the single next action I need to take; never report unverified work as complete. When finished, summarize the Bot link, Worker URL, chosen language, admin mode, verification results, and where I should retain credentials, without displaying secret values.
 
 This bot relays Telegram private messages to a separate topic for each user in an admin supergroup. The admin replies from that topic. Without a configured group, it falls back to the admin's private chat. It runs on a Cloudflare Worker with D1 and a Telegram webhook, and does not store message text or media content.
 
@@ -280,7 +284,9 @@ If you do not know the group ID, register the webhook, have the admin send `/set
 
 Users message the bot privately. In topic mode, the admin replies in the matching topic; in private-chat mode, the admin must reply to the relayed message. Text, ordinary media, albums, and edit syncing are supported. Telegram message types that cannot be copied cannot be relayed. Users can run `/start` and `/id`. In topic mode, the admin can run `/user`, `/block`, `/unblock`, `/close`, and `/help` inside a topic. In private-chat mode, `/user`, `/block`, and `/unblock` must be replies to a relayed message. The admin can send `/status` in the Bot's private chat to see the past 24 hours of processing and the webhook pending count; it also works in a management-group topic. Sending `/start` in the Bot's private chat sets a mode-specific Telegram command menu visible only to that admin. `/close` is topic-only.
 
-Sending `/forget` shows confirmation instructions; only `/forget confirm` erases personal data, album staging, and relay mappings stored in the Bot's D1. For blocked users, the ID and blocked state remain so this command cannot bypass a block; the admin can later send `/unblock USER_ID` in the Bot's private chat. This **does not delete existing Telegram messages on either side or existing backups**. Sending another message may create new data. `/status` is an operational summary, not a substitute for a real two-way delivery test.
+Sending `/forget` shows confirmation instructions; only `/forget confirm` erases personal data, album staging, and relay mappings stored in the Bot's D1. Control records without names prevent old requests from restoring data; unblocked users' records are removed by scheduled cleanup after 7 days. Blocked IDs, blocked state, and their control records remain; the admin can send `/unblock USER_ID` privately. This **does not delete existing Telegram messages or backups**. Later new messages may create data again. `/status` also shows processing updates and expired leases, but is not a substitute for a real two-way delivery test.
+
+Edit syncing covers text and captions, not media replacement. If Telegram performs a copy but its response is lost, a retry can still deliver a duplicate; check both sides before resending. If saving a relay mapping fails, the Bot retries the save and then tries to remove the copy. If both fail, it stops automatic resending and notifies the sender.
 
 ```powershell
 Invoke-RestMethod 'https://YOUR_WORKER.workers.dev/health'
@@ -289,7 +295,7 @@ Invoke-RestMethod 'https://YOUR_WORKER.workers.dev/ready'
 ./tools/Test-WorkerRuntime.ps1 -WorkerUrl 'https://YOUR_WORKER.workers.dev'
 ```
 
-`/ready` checks configuration and D1, not Telegram permissions. The runtime probe sends a safe update and removes its D1 row, but does not test actual Telegram delivery. Also test the full flow with a non-admin account: private message → admin receives it → admin replies → user receives the reply. If you use a custom config file, pass `-Config 'path/to/config'` to the probe so it cleans up the correct D1 database.
+`/ready` checks configuration and the D1 schema, not Telegram permissions. The runtime probe sends a safe update and removes its D1 row, but does not test actual Telegram delivery. Also test the full flow with a non-admin account: private message → admin receives it → admin replies → user receives the reply. If you use a custom config file, pass `-Config 'path/to/config'` to the probe so it cleans up the correct D1 database.
 
 ### License
 

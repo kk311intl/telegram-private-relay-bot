@@ -16,10 +16,12 @@ class BoundStatement {
     return this;
   }
 
-  async run() {
+  runSync() {
     const result = this.database.prepare(this.sql).run(...this.values);
     return { success: true, meta: { changes: Number(result.changes) } };
   }
+
+  async run() { return this.runSync(); }
 
   async first() {
     return this.database.prepare(this.sql).get(...this.values) || null;
@@ -31,10 +33,10 @@ class BoundStatement {
 }
 
 class TestD1 {
-  constructor() {
+  constructor(migrationLimit = Infinity) {
     this.database = new DatabaseSync(":memory:");
     const migrationsUrl = new URL("../migrations/", import.meta.url);
-    for (const migration of readdirSync(migrationsUrl).filter((name) => name.endsWith(".sql")).sort()) {
+    for (const migration of readdirSync(migrationsUrl).filter((name) => name.endsWith(".sql")).sort().slice(0, migrationLimit)) {
       this.database.exec(readFileSync(new URL(migration, migrationsUrl), "utf8"));
     }
   }
@@ -47,7 +49,7 @@ class TestD1 {
     this.database.exec("BEGIN");
     try {
       const results = [];
-      for (const statement of statements) results.push(await statement.run());
+      for (const statement of statements) results.push(statement.runSync());
       this.database.exec("COMMIT");
       return results;
     } catch (error) {
@@ -78,6 +80,358 @@ function telegramResponse(result, status = 200) {
     headers: { "content-type": "application/json" }
   });
 }
+
+async function withDatabaseMock(run) {
+  const db = new TestD1();
+  const originals = { fetch: globalThis.fetch, now: Date.now, timeout: globalThis.setTimeout };
+  try { await run(db); }
+  finally {
+    globalThis.fetch = originals.fetch;
+    Date.now = originals.now;
+    globalThis.setTimeout = originals.timeout;
+    db.close();
+  }
+}
+
+function injectWriteFailure(db, matches, times = 1) {
+  const prepare = db.prepare.bind(db);
+  db.prepare = (sql) => {
+    const statement = prepare(sql);
+    const run = statement.runSync.bind(statement);
+    statement.runSync = () => {
+      if (times > 0 && matches(sql)) { times--; throw new Error("temporary D1 failure"); }
+      return run();
+    };
+    return statement;
+  };
+}
+
+function auditEnv(db, topic = true) {
+  return { BOT_DB: db, BOT_TOKEN: "test-token", WEBHOOK_SECRET: "test-secret", ADMIN_USER_ID: "1",
+    ...(topic ? { ADMIN_GROUP_ID: "-1001" } : {}) };
+}
+
+function auditRequest(id, message) {
+  return new Request("https://example.com/webhook", {
+    method: "POST", headers: { "X-Telegram-Bot-Api-Secret-Token": "test-secret" },
+    body: JSON.stringify({ update_id: id, message })
+  });
+}
+
+function seedAuditUser(db) {
+  db.database.exec("INSERT INTO users(user_id,first_name,topic_id,topic_card_message_id,created_at,updated_at) VALUES ('2','Test',72,0,1,1)");
+}
+
+test("初始化寫入暫時失敗後，相簿可由下一次重試完成", () => withDatabaseMock(async (db) => {
+  let copies = 0;
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/copyMessages")) { copies++; return telegramResponse([{ message_id: 700 }]); }
+    if (String(url).endsWith("/createForumTopic")) return telegramResponse({ message_thread_id: 72 });
+    return telegramResponse({ message_id: 701 });
+  };
+  injectWriteFailure(db, (sql) => /UPDATE media_groups SET state = \?/.test(sql));
+  const message = userMessage(10, { text: undefined, media_group_id: "recover-init", photo: [{}] });
+  const env = auditEnv(db);
+  assert.equal((await worker.fetch(auditRequest(7001, message), env)).status, 500);
+  assert.equal((await worker.fetch(auditRequest(7001, message), env)).status, 200);
+  assert.equal(copies, 1);
+  assert.equal((await db.prepare("SELECT state FROM media_groups").first()).state, "done");
+}));
+
+test("第一則訊息為相簿時，Topic 和身分卡仍使用正確 User ID", () => withDatabaseMock(async (db) => {
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    const method = String(url).split("/").pop();
+    calls.push({ method, payload: JSON.parse(init.body) });
+    if (method === "createForumTopic") return telegramResponse({ message_thread_id: 72 });
+    if (method === "copyMessages") return telegramResponse([{ message_id: 700 }]);
+    return telegramResponse({ message_id: 701 });
+  };
+  await processUpdate({ message: userMessage(10, { text: undefined, media_group_id: "identity", photo: [{}] }) }, auditEnv(db));
+  assert.match(calls.find((call) => call.method === "createForumTopic").payload.name, /· 2$/);
+  assert.match(calls.find((call) => call.method === "sendMessage").payload.text, /<code>2<\/code>/);
+}));
+
+test("清除確認後，先前仍在轉送的訊息不能重建對照", () => withDatabaseMock(async (db) => {
+  let releaseCopy, enteredCopy;
+  const entered = new Promise((resolve) => { enteredCopy = resolve; });
+  const deleted = [];
+  globalThis.fetch = async (url, init) => {
+    const method = String(url).split("/").pop();
+    if (method === "copyMessage") {
+      enteredCopy();
+      await new Promise((resolve) => { releaseCopy = resolve; });
+      return telegramResponse({ message_id: 700 });
+    }
+    if (method === "deleteMessages") deleted.push(...JSON.parse(init.body).message_ids);
+    return telegramResponse({ message_id: 701 });
+  };
+  const env = auditEnv(db, false);
+  const inflight = processUpdate({ message: userMessage(10) }, env);
+  await entered;
+  await processUpdate({ message: userMessage(11, { text: "/forget confirm" }) }, env);
+  releaseCopy(); await inflight;
+  assert.equal((await db.prepare("SELECT COUNT(*) AS total FROM message_map").first()).total, 0);
+  assert.deepEqual(deleted, [700]);
+  assert.equal((await db.prepare("SELECT erased FROM users").first()).erased, 1);
+}));
+
+test("清除回覆失敗的重試不會刪掉之後的新資料", () => withDatabaseMock(async (db) => {
+  seedAuditUser(db);
+  let failConfirmation = true;
+  globalThis.fetch = async (url, init) => {
+    const payload = JSON.parse(init.body);
+    if (String(url).endsWith("/sendMessage") && payload.text?.includes("這次清除") && failConfirmation) {
+      failConfirmation = false; return telegramResponse(false, 503);
+    }
+    if (String(url).endsWith("/createForumTopic")) return telegramResponse({ message_thread_id: 73 });
+    return telegramResponse({ message_id: 700 });
+  };
+  const env = auditEnv(db), forget = userMessage(20, { text: "/forget confirm" });
+  assert.equal((await worker.fetch(auditRequest(7002, forget), env)).status, 500);
+  await processUpdate({ message: userMessage(21) }, env);
+  assert.equal((await worker.fetch(auditRequest(7002, forget), env)).status, 200);
+  assert.equal((await db.prepare("SELECT COUNT(*) AS total FROM message_map").first()).total, 1);
+  assert.equal((await db.prepare("SELECT erased FROM users").first()).erased, 0);
+}));
+
+test("清除前尚未開始處理的舊訊息不能重建個人資料", () => withDatabaseMock(async (db) => {
+  globalThis.fetch = async () => telegramResponse({ message_id: 700 });
+  const env = auditEnv(db, false);
+  await processUpdate({ message: userMessage(30, { text: "/forget confirm" }) }, env);
+  await processUpdate({ message: userMessage(29) }, env);
+  const user = await db.prepare("SELECT * FROM users").first();
+  assert.equal(user.erased, 1);
+  assert.equal(user.first_name, "");
+  assert.equal((await db.prepare("SELECT COUNT(*) AS total FROM message_map").first()).total, 0);
+}));
+
+test("已接受的訊息重試不會被較新訊息的節流額度誤攔", () => withDatabaseMock(async (db) => {
+  seedAuditUser(db);
+  let now = 1800000000000, fail = true;
+  Date.now = () => now;
+  const copies = [];
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith("/copyMessage")) {
+      copies.push(JSON.parse(init.body).message_id);
+      if (fail) { fail = false; return telegramResponse(false, 503); }
+    }
+    return telegramResponse({ message_id: 700 + copies.length });
+  };
+  const env = auditEnv(db);
+  assert.equal((await worker.fetch(auditRequest(7003, userMessage(40)), env)).status, 500);
+  now += 2000;
+  await worker.fetch(auditRequest(7004, userMessage(41)), env);
+  assert.equal((await worker.fetch(auditRequest(7003, userMessage(40)), env)).status, 200);
+  assert.deepEqual(copies, [40, 41, 40]);
+  assert.ok(await db.prepare("SELECT 1 FROM message_map WHERE source_message_id=40").first());
+}));
+
+test("保存對照暫時失敗時只重試 D1，不重新轉送", () => withDatabaseMock(async (db) => {
+  seedAuditUser(db);
+  let copies = 0;
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/copyMessage")) copies++;
+    return telegramResponse({ message_id: 700 });
+  };
+  injectWriteFailure(db, (sql) => /INSERT OR REPLACE INTO message_map/.test(sql));
+  assert.equal((await worker.fetch(auditRequest(7005, userMessage(50)), auditEnv(db))).status, 200);
+  assert.equal(copies, 1);
+  assert.ok(await db.prepare("SELECT 1 FROM message_map WHERE source_message_id=50").first());
+}));
+
+test("對照連續失敗會先撤回副本，下一次重試只留一則訊息", () => withDatabaseMock(async (db) => {
+  seedAuditUser(db);
+  let copies = 0;
+  const removed = [];
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith("/copyMessage")) return telegramResponse({ message_id: 700 + ++copies });
+    if (String(url).endsWith("/deleteMessages")) removed.push(...JSON.parse(init.body).message_ids);
+    return telegramResponse(true);
+  };
+  injectWriteFailure(db, (sql) => /INSERT OR REPLACE INTO message_map/.test(sql), 3);
+  const env = auditEnv(db), request = () => auditRequest(7006, userMessage(51));
+  assert.equal((await worker.fetch(request(), env)).status, 500);
+  assert.equal((await worker.fetch(request(), env)).status, 200);
+  assert.equal(copies, 2);
+  assert.deepEqual(removed, [701]);
+  assert.equal((await db.prepare("SELECT target_message_id FROM message_map").first()).target_message_id, 702);
+}));
+
+test("相簿已保存對照後狀態寫入失敗，不會整組重送", () => withDatabaseMock(async (db) => {
+  seedAuditUser(db);
+  let copies = 0;
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/copyMessages")) { copies++; return telegramResponse([{ message_id: 700 }]); }
+    return telegramResponse({ message_id: 701 });
+  };
+  injectWriteFailure(db, (sql) => /UPDATE media_groups SET state = 'done'/.test(sql));
+  const env = auditEnv(db), message = userMessage(60, { text: undefined, media_group_id: "recover-done", photo: [{}] });
+  assert.equal((await worker.fetch(auditRequest(7007, message), env)).status, 500);
+  assert.equal((await worker.fetch(auditRequest(7007, message), env)).status, 200);
+  assert.equal(copies, 1);
+}));
+
+test("狀態摘要會顯示處理中及逾期租約", () => withDatabaseMock(async (db) => {
+  const now = Math.floor(Date.now() / 1000);
+  await db.prepare(`INSERT INTO processed_updates(update_id,processed_at,status,attempts,updated_at)
+    VALUES (7008,?,'processing',1,?)`).bind(now - 120, now - 120).run();
+  let text;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith("/getWebhookInfo")) return telegramResponse({ pending_update_count: 0 });
+    text = JSON.parse(init.body).text; return telegramResponse(true);
+  };
+  await processUpdate({ message: { message_id: 70, chat: { id: 1, type: "private" },
+    from: { id: 1, is_bot: false }, text: "/status" } }, auditEnv(db));
+  assert.match(text, /處理中: 1/);
+  assert.match(text, /處理租約已逾期: 1/);
+}));
+
+test("發給其他 Bot 的管理指令不執行，給自己的後綴仍可用", () => withDatabaseMock(async (db) => {
+  seedAuditUser(db);
+  globalThis.fetch = async (url) => telegramResponse(String(url).endsWith("/getMe") ? { username: "ThisRelayBot" } : true);
+  const env = { ...auditEnv(db), BOT_TOKEN: "test-command-token" };
+  const message = { message_id: 80, chat: { id: -1001, type: "supergroup", is_forum: true },
+    from: { id: 1, is_bot: false }, message_thread_id: 72, text: "/block@AnotherBot" };
+  await processUpdate({ message }, env);
+  assert.equal((await db.prepare("SELECT blocked FROM users").first()).blocked, 0);
+  await processUpdate({ message: { ...message, text: "/block@AnotherBot!" } }, env);
+  assert.equal((await db.prepare("SELECT blocked FROM users").first()).blocked, 0);
+  await processUpdate({ message: { ...message, text: "/block@ThisRelayBot" } }, env);
+  assert.equal((await db.prepare("SELECT blocked FROM users").first()).blocked, 1);
+}));
+
+test("清空或移除媒體 caption 都會同步空字串", () => withDatabaseMock(async (db) => {
+  seedAuditUser(db);
+  db.database.exec("INSERT INTO message_map VALUES ('2',90,'-1001',700,'2',1)");
+  const captions = [];
+  globalThis.fetch = async (url, init) => {
+    assert.ok(String(url).endsWith("/editMessageCaption"));
+    captions.push(JSON.parse(init.body).caption); return telegramResponse(true);
+  };
+  for (const caption of ["", undefined]) await processUpdate({ edited_message: userMessage(90,
+    { text: undefined, caption, photo: [{}] }) }, auditEnv(db));
+  assert.deepEqual(captions, ["", ""]);
+}));
+
+test("Telegram 逾時限制涵蓋 HTTP 回應本文", () => withDatabaseMock(async (db) => {
+  const realTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (callback, delay, ...args) => realTimeout(callback, delay === 15000 ? 10 : delay, ...args);
+  let signal;
+  globalThis.fetch = async (_url, init) => {
+    signal = init.signal;
+    return { ok: true, status: 200, json: () => new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new Error("body aborted")), { once: true });
+    }) };
+  };
+  await assert.rejects(processUpdate({ message: userMessage(100, { text: "/start" }) }, auditEnv(db)), /回應讀取失敗/);
+  assert.equal(signal.aborted, true);
+}));
+
+test("第五次工作租約仍有效時，重複更新不得提前放棄", () => withDatabaseMock(async (db) => {
+  const now = Math.floor(Date.now() / 1000);
+  await db.prepare(`INSERT INTO processed_updates(update_id,processed_at,status,attempts,updated_at,lease_token)
+    VALUES (7009,?,'processing',5,?,'active')`).bind(now, now).run();
+  assert.equal((await worker.fetch(auditRequest(7009, userMessage(110)), auditEnv(db))).status, 500);
+  assert.equal((await db.prepare("SELECT status FROM processed_updates").first()).status, "processing");
+}));
+
+test("七天後清理非封鎖清除控制紀錄，保留封鎖紀錄與重新建立的資料", () => withDatabaseMock(async (db) => {
+  const old = Math.floor(Date.now() / 1000) - 8 * 86400;
+  await db.prepare(`INSERT INTO users(user_id,blocked,erased,forgotten_at,created_at,updated_at)
+    VALUES ('2',0,1,?,?,?),('3',1,1,?,?,?),('4',0,0,?,?,?)`)
+    .bind(old, old, old, old, old, old, old, old, old).run();
+  let cleanup;
+  await worker.scheduled({}, auditEnv(db), { waitUntil(promise) { cleanup = promise; } });
+  await cleanup;
+  assert.equal(await db.prepare("SELECT * FROM users WHERE user_id='2'").first(), null);
+  assert.ok(await db.prepare("SELECT * FROM users WHERE user_id='3'").first());
+  assert.ok(await db.prepare("SELECT * FROM users WHERE user_id='4'").first());
+}));
+
+test("失去更新租約的舊工作會撤回自己的副本，不能覆寫新對照", () => withDatabaseMock(async (db) => {
+  seedAuditUser(db);
+  let now = 1800000000000, copies = 0, releaseCopy, enteredCopy;
+  Date.now = () => now;
+  const entered = new Promise((resolve) => { enteredCopy = resolve; });
+  const removed = [];
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith("/copyMessage")) {
+      const id = 700 + ++copies;
+      if (copies === 1) { enteredCopy(); await new Promise((resolve) => { releaseCopy = resolve; }); }
+      return telegramResponse({ message_id: id });
+    }
+    if (String(url).endsWith("/deleteMessages")) removed.push(...JSON.parse(init.body).message_ids);
+    return telegramResponse(true);
+  };
+  const env = auditEnv(db), request = () => auditRequest(7010, userMessage(120));
+  const old = worker.fetch(request(), env);
+  await entered;
+  now += 61000;
+  assert.equal((await worker.fetch(request(), env)).status, 200);
+  releaseCopy();
+  assert.equal((await old).status, 200);
+  assert.deepEqual(removed, [701]);
+  assert.equal((await db.prepare("SELECT target_message_id FROM message_map").first()).target_message_id, 702);
+  assert.equal((await db.prepare("SELECT status FROM processed_updates").first()).status, "done");
+}));
+
+test("失去相簿租約的舊工作不能覆寫接手者的對照或狀態", () => withDatabaseMock(async (db) => {
+  seedAuditUser(db);
+  const realNow = Date.now;
+  let offset = 0, copies = 0, releaseCopy, enteredCopy;
+  Date.now = () => realNow() + offset;
+  const entered = new Promise((resolve) => { enteredCopy = resolve; });
+  const removed = [];
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith("/copyMessages")) {
+      const messageIds = JSON.parse(init.body).message_ids;
+      const first = ++copies === 1;
+      if (first) { enteredCopy(); await new Promise((resolve) => { releaseCopy = resolve; }); }
+      return telegramResponse(messageIds.map((_id, index) => ({ message_id: first ? 701 : 702 + index })));
+    }
+    if (String(url).endsWith("/deleteMessages")) removed.push(...JSON.parse(init.body).message_ids);
+    return telegramResponse(true);
+  };
+  const env = auditEnv(db);
+  const photo = (id) => userMessage(id, { text: undefined, media_group_id: "reclaimed-album", photo: [{}] });
+  const old = worker.fetch(auditRequest(7012, photo(130)), env);
+  await entered;
+  offset += 61000;
+  assert.equal((await worker.fetch(auditRequest(7013, photo(131)), env)).status, 200);
+  releaseCopy(); await old;
+  assert.deepEqual(removed, [701]);
+  const mappings = (await db.prepare("SELECT target_message_id FROM message_map ORDER BY source_message_id").all()).results;
+  assert.deepEqual(mappings.map((row) => row.target_message_id), [702, 703]);
+  assert.equal((await db.prepare("SELECT state FROM media_groups").first()).state, "done");
+}));
+
+test("撤回失敗時告知發送者並停止同一更新自動重送", () => withDatabaseMock(async (db) => {
+  seedAuditUser(db);
+  let copies = 0, notice;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith("/copyMessage")) { copies++; return telegramResponse({ message_id: 700 }); }
+    if (String(url).endsWith("/deleteMessages")) return telegramResponse(false, 403);
+    notice = JSON.parse(init.body).text; return telegramResponse(true);
+  };
+  injectWriteFailure(db, (sql) => /INSERT OR REPLACE INTO message_map/.test(sql), 3);
+  const env = auditEnv(db), request = () => auditRequest(7011, userMessage(121));
+  const result = await worker.fetch(request(), env);
+  assert.equal((await result.json()).discarded, true);
+  await worker.fetch(request(), env);
+  assert.equal(copies, 1);
+  assert.match(notice, /停止自動重送/);
+}));
+
+test("ready 拒絕缺少新 migration 的 D1，套用後恢復", async () => {
+  const db = new TestD1(3);
+  try {
+    const request = () => new Request("https://example.com/ready");
+    assert.equal((await worker.fetch(request(), auditEnv(db))).status, 503);
+    db.database.exec(readFileSync(new URL("../migrations/0004_recovery_and_erasure.sql", import.meta.url), "utf8"));
+    assert.equal((await worker.fetch(request(), auditEnv(db))).status, 200);
+  } finally { db.close(); }
+});
 
 test("管理者 /start 設定只對本人可見的模式專屬指令選單", async () => {
   const originalFetch = globalThis.fetch;
@@ -182,18 +536,21 @@ test("/forget 需確認並清除路由資料，封鎖者保留最小封鎖紀錄
     await processUpdate({ message: userMessage(3, {
       chat: { id: 3, type: "private" }, from: { id: 3, is_bot: false }, text: "/forget confirm"
     }) }, env);
-    assert.equal(await db.prepare("SELECT * FROM users WHERE user_id = '2'").first(), null);
+    const erased = await db.prepare("SELECT * FROM users WHERE user_id = '2'").first();
+    assert.equal(erased.erased, 1);
+    assert.equal(erased.first_name, "");
+    assert.equal(erased.topic_id, null);
     const blocked = await db.prepare("SELECT * FROM users WHERE user_id = '3'").first();
     assert.equal(blocked.blocked, 1);
     assert.equal(blocked.username, null);
     assert.equal(blocked.first_name, "");
     assert.equal(blocked.topic_id, null);
-    assert.match(sent.at(-1).text, /ID 和封鎖狀態/);
+    assert.match(sent.at(-1).text, /封鎖狀態仍保留/);
     await processUpdate({ message: {
       message_id: 4, chat: { id: 1, type: "private" },
       from: { id: 1, is_bot: false }, text: "/unblock 3"
     } }, env);
-    assert.equal(await db.prepare("SELECT * FROM users WHERE user_id = '3'").first(), null);
+    assert.equal((await db.prepare("SELECT * FROM users WHERE user_id = '3'").first()).blocked, 0);
     for (const table of ["message_map", "media_groups", "media_group_messages"]) {
       assert.equal((await db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).first()).count, 0);
     }

@@ -9,6 +9,7 @@ const TOPIC_LEASE_SECONDS = 30;
 const MEDIA_GROUP_QUIET_MS = 900;
 const CONVERSATION_WINDOW_SECONDS = 6 * 60 * 60;
 const TELEGRAM_TIMEOUT_MS = 15_000;
+let botIdentity;
 
 export default {
   async fetch(request, env, ctx) {
@@ -56,13 +57,20 @@ export default {
       return new Response("Bad request", { status: 400 });
     }
 
+    let leaseToken;
     try {
       const claim = await claimUpdate(env.BOT_DB, update.update_id);
-      if (claim === "duplicate") return json({ ok: true, duplicate: true });
-      if (claim === "exhausted") return json({ ok: true, discarded: true });
-      if (claim === "busy") return json({ ok: false, busy: true }, { status: 500 });
-      await processUpdate(update, env);
-      await finishUpdate(env.BOT_DB, update.update_id, "done");
+      if (claim.status === "duplicate") return json({ ok: true, duplicate: true });
+      if (claim.status === "exhausted") return json({ ok: true, discarded: true });
+      if (claim.status === "busy") return json({ ok: false, busy: true }, { status: 500 });
+      leaseToken = claim.token;
+      await processUpdate(update, { ...env, _updateLease: { id: update.update_id, token: leaseToken } });
+      const finished = await finishUpdate(env.BOT_DB, update.update_id, "done", leaseToken);
+      if (Number(finished.meta?.changes || 0) !== 1) {
+        const current = await env.BOT_DB.prepare("SELECT status FROM processed_updates WHERE update_id = ?")
+          .bind(update.update_id).first();
+        if (!["done", "discarded"].includes(current?.status)) return json({ ok: false, busy: true }, { status: 500 });
+      }
       return json({ ok: true });
     } catch (error) {
       const retryable = isRetryableError(error);
@@ -70,8 +78,10 @@ export default {
         env.BOT_DB,
         update.update_id,
         retryable,
-        error
+        error,
+        leaseToken
       ).catch(() => null);
+      if (storedStatus === "done") return json({ ok: true, duplicate: true });
       const willRetry = retryable && storedStatus !== "discarded";
       console.log(JSON.stringify({
         event: willRetry
@@ -100,12 +110,18 @@ export default {
 };
 
 export async function processUpdate(update, env) {
-  if (update.message) return processMessage(update.message, env);
-  if (update.edited_message) return processEditedMessage(update.edited_message, env);
+  const message = update.message || update.edited_message;
+  if (message && !(await commandIsForBot(message.text, env))) return;
+  try {
+    if (update.message) return await processMessage(update.message, env);
+    if (update.edited_message) return await processEditedMessage(update.edited_message, env);
+  } catch (error) {
+    if (!(error instanceof ObsoleteWorkError)) throw error;
+  }
 }
 
 async function processMessage(message, env) {
-  if (!message?.chat || message.from?.is_bot) return;
+  if (!message?.chat || !message.from || message.from.is_bot) return;
 
   const chatId = String(message.chat.id);
   if (message.chat.type === "private") {
@@ -155,12 +171,6 @@ async function processAdminPrivateMessage(message, env) {
         UPDATE users SET blocked = 0, blocked_notice_at = 0, updated_at = ?
         WHERE user_id = ? AND blocked = 1
       `).bind(Math.floor(Date.now() / 1000), targetId).run();
-      if (Number(result.meta?.changes || 0) === 1) {
-        await env.BOT_DB.prepare(`
-          DELETE FROM users WHERE user_id = ? AND blocked = 0 AND topic_id IS NULL
-            AND username IS NULL AND first_name = '' AND last_name = ''
-        `).bind(targetId).run();
-      }
       await telegram(env, "sendMessage", {
         chat_id: message.chat.id,
         text: t(env.BOT_LANGUAGE, Number(result.meta?.changes || 0) === 1 ? "unblocked" : "notBlocked")
@@ -204,12 +214,15 @@ async function configureAdminMenu(env) {
 }
 
 async function sendAdminStatus(chatId, topicId, env) {
-  const since = Math.floor(Date.now() / 1000) - 86400;
+  const now = Math.floor(Date.now() / 1000);
   const counts = await env.BOT_DB.prepare(`
-    SELECT status, COUNT(*) AS total FROM processed_updates
+    SELECT status, COUNT(*) AS total,
+      SUM(CASE WHEN status = 'processing' AND updated_at <= ? THEN 1 ELSE 0 END) AS stalled
+    FROM processed_updates
     WHERE updated_at >= ? GROUP BY status
-  `).bind(since).all();
+  `).bind(now - UPDATE_LEASE_SECONDS, now - 86400).all();
   const byStatus = Object.fromEntries((counts.results || []).map((row) => [row.status, row.total]));
+  const stalled = (counts.results || []).find((row) => row.status === "processing")?.stalled || 0;
   let pending = t(env.BOT_LANGUAGE, "unknown");
   try {
     const webhook = await telegram(env, "getWebhookInfo", {});
@@ -220,7 +233,7 @@ async function sendAdminStatus(chatId, topicId, env) {
   await telegram(env, "sendMessage", {
     chat_id: chatId,
     message_thread_id: topicId,
-    text: `${t(env.BOT_LANGUAGE, "adminStatus")}\n${t(env.BOT_LANGUAGE, "statusDone")}: ${byStatus.done || 0}\n${t(env.BOT_LANGUAGE, "statusFailed")}: ${byStatus.failed || 0}\n${t(env.BOT_LANGUAGE, "statusDiscarded")}: ${byStatus.discarded || 0}\n${t(env.BOT_LANGUAGE, "statusPending")}: ${pending}`
+    text: `${t(env.BOT_LANGUAGE, "adminStatus")}\n${t(env.BOT_LANGUAGE, "statusDone")}: ${byStatus.done || 0}\n${t(env.BOT_LANGUAGE, "statusProcessing")}: ${byStatus.processing || 0}\n${t(env.BOT_LANGUAGE, "statusStalled")}: ${stalled}\n${t(env.BOT_LANGUAGE, "statusFailed")}: ${byStatus.failed || 0}\n${t(env.BOT_LANGUAGE, "statusDiscarded")}: ${byStatus.discarded || 0}\n${t(env.BOT_LANGUAGE, "statusPending")}: ${pending}`
   });
 }
 
@@ -234,7 +247,7 @@ async function processUserMessage(message, env) {
   const command = parseCommand(message.text);
   if (command === "forget") {
     const confirmed = /^\/forget(?:@[A-Za-z0-9_]+)?\s+confirm\s*$/i.test(message.text.trim());
-    if (confirmed) await forgetUser(env.BOT_DB, userId, now);
+    if (confirmed) await forgetUser(env.BOT_DB, userId, message.message_id, now);
     await telegram(env, "sendMessage", {
       chat_id: message.chat.id,
       text: t(env.BOT_LANGUAGE, confirmed ? "forgetDone" : "forgetConfirm")
@@ -263,7 +276,8 @@ async function processUserMessage(message, env) {
     60,
     2
   );
-  user = await upsertUser(env.BOT_DB, message.from, now);
+  user = await upsertUser(env.BOT_DB, message.from, now, message.message_id);
+  if (!user || user.blocked || user.erased || message.message_id <= user.forgotten_message_id) return;
 
   if (command === "start") {
     await telegram(env, "sendMessage", {
@@ -281,7 +295,7 @@ async function processUserMessage(message, env) {
   }
 
   if (message.media_group_id) {
-    const queued = await enqueueMediaMessage(message, userId, "user_to_admin", env, now, interval);
+    const queued = await enqueueMediaMessage(message, user, "user_to_admin", env, now, interval);
     if (queued.rejected) {
       if (queued.created) await sendRateLimitNotice(message.chat.id, env);
       return;
@@ -296,7 +310,7 @@ async function processUserMessage(message, env) {
   const rateKey = message.media_group_id
     ? `album:${message.media_group_id}`
     : `message:${message.message_id}`;
-  if (!(await claimRateSlot(env.BOT_DB, userId, now, interval, rateKey))) {
+  if (!(await claimRateSlot(env.BOT_DB, user, now, interval, rateKey))) {
     await sendRateLimitNotice(message.chat.id, env);
     return;
   }
@@ -339,40 +353,48 @@ async function processUserMessage(message, env) {
     });
   }
 
-  await saveMessageMap(env.BOT_DB, {
+  await saveCopiedMappings(env, user, [{
     sourceChatId: String(message.chat.id),
     sourceMessageId: message.message_id,
     targetChatId: String(env.ADMIN_GROUP_ID),
     targetMessageId: copied.message_id,
     userId,
     now
-  });
+  }]);
 }
 
-async function forgetUser(db, userId, now) {
+async function forgetUser(db, userId, messageId, now) {
   await db.batch([
     db.prepare(`
-      DELETE FROM media_group_messages WHERE EXISTS (
+      INSERT OR IGNORE INTO users(user_id, created_at, updated_at, erased)
+      VALUES (?, ?, ?, 1)
+    `).bind(userId, now, now),
+    db.prepare(`
+      DELETE FROM media_group_messages WHERE (source_chat_id = ? OR EXISTS (
         SELECT 1 FROM media_groups AS groups
         WHERE groups.user_id = ?
           AND groups.source_chat_id = media_group_messages.source_chat_id
           AND groups.media_group_id = media_group_messages.media_group_id
-      )
-    `).bind(userId),
-    db.prepare("DELETE FROM media_groups WHERE user_id = ?").bind(userId),
-    db.prepare("DELETE FROM message_map WHERE user_id = ?").bind(userId),
+      ))
+        AND EXISTS (SELECT 1 FROM users WHERE user_id = ? AND forgotten_message_id < ?)
+    `).bind(userId, userId, userId, messageId),
+    ...["media_groups", "message_map", "rate_admissions"].map((table) => db.prepare(`
+      DELETE FROM ${table} WHERE user_id = ?
+        AND EXISTS (SELECT 1 FROM users WHERE user_id = ? AND forgotten_message_id < ?)
+    `).bind(userId, userId, messageId)),
     db.prepare(`
       UPDATE users SET username = NULL, first_name = '', last_name = '', topic_id = NULL,
-        topic_card_message_id = NULL, topic_lease_until = 0, last_message_at = 0,
-        last_rate_key = NULL, blocked_notice_at = 0, updated_at = ?
-      WHERE user_id = ?
-    `).bind(now, userId),
-    db.prepare("DELETE FROM users WHERE user_id = ? AND blocked = 0").bind(userId)
+        topic_card_message_id = NULL, topic_lease_until = 0, topic_lease_token = NULL,
+        last_rate_key = NULL, blocked_notice_at = 0, updated_at = ?,
+        generation = generation + 1, erased = 1, forgotten_message_id = ?, forgotten_at = ?
+      WHERE user_id = ? AND forgotten_message_id < ?
+    `).bind(now, messageId, now, userId, messageId)
   ]);
 }
 
 export async function relayUserMessageToAdmin(message, user, env, now) {
   if (await getMessageMap(env.BOT_DB, String(message.chat.id), message.message_id)) return;
+  await requireCurrentUser(env.BOT_DB, user, true);
 
   const mappedReply = await targetReplyParameters(
     env.BOT_DB,
@@ -400,14 +422,14 @@ export async function relayUserMessageToAdmin(message, user, env, now) {
     throw error;
   }
 
-  await saveMessageMap(env.BOT_DB, {
+  await saveCopiedMappings(env, user, [{
     sourceChatId: String(message.chat.id),
     sourceMessageId: message.message_id,
     targetChatId: String(env.ADMIN_USER_ID),
     targetMessageId: copied.message_id,
     userId: user.user_id,
     now
-  });
+  }]);
 }
 
 export async function processDirectAdminReply(message, env) {
@@ -435,7 +457,7 @@ export async function processDirectAdminReply(message, env) {
   }
 
   const user = await getUser(env.BOT_DB, mapping.user_id);
-  if (!user) return;
+  if (!user || user.erased) return;
 
   const command = parseCommand(message.text);
   if (command === "block" || command === "unblock") {
@@ -467,7 +489,7 @@ export async function processDirectAdminReply(message, env) {
   if (message.media_group_id) {
     const queued = await enqueueMediaMessage(
       message,
-      user.user_id,
+      user,
       "admin_to_user",
       env,
       Math.floor(Date.now() / 1000),
@@ -495,14 +517,14 @@ export async function processDirectAdminReply(message, env) {
     await notifyAdminDeliveryFailure(message, error, env);
     throw error;
   }
-  await saveMessageMap(env.BOT_DB, {
+  await saveCopiedMappings(env, user, [{
     sourceChatId: String(env.ADMIN_USER_ID),
     sourceMessageId: message.message_id,
     targetChatId: user.user_id,
     targetMessageId: copied.message_id,
     userId: user.user_id,
     now: Math.floor(Date.now() / 1000)
-  });
+  }]);
 }
 
 function buildDirectUserStatus(user, language) {
@@ -545,7 +567,7 @@ async function processAdminTopicMessage(message, env) {
   if (message.media_group_id) {
     const queued = await enqueueMediaMessage(
       message,
-      user.user_id,
+      user,
       "admin_to_user",
       env,
       Math.floor(Date.now() / 1000),
@@ -577,14 +599,14 @@ async function processAdminTopicMessage(message, env) {
     throw error;
   }
 
-  await saveMessageMap(env.BOT_DB, {
+  await saveCopiedMappings(env, user, [{
     sourceChatId: String(env.ADMIN_GROUP_ID),
     sourceMessageId: message.message_id,
     targetChatId: user.user_id,
     targetMessageId: copied.message_id,
     userId: user.user_id,
     now: Math.floor(Date.now() / 1000)
-  });
+  }]);
 }
 
 async function handleAdminCommand(command, message, user, env) {
@@ -615,7 +637,10 @@ async function handleAdminCommand(command, message, user, env) {
 }
 
 async function processEditedMessage(message, env) {
-  if (!message?.chat || (!message.text && !message.caption)) return;
+  if (!message?.chat || !message.from) return;
+  const isText = typeof message.text === "string";
+  const hasCaptionMedia = ["photo", "video", "animation", "audio", "document", "voice"].some((key) => message[key]);
+  if (!isText && typeof message.caption !== "string" && !hasCaptionMedia) return;
   const chatId = String(message.chat.id);
   const isUserEdit = message.chat.type === "private" && String(message.from?.id) !== String(env.ADMIN_USER_ID);
   const isAdminTopicEdit = chatId === String(env.ADMIN_GROUP_ID) && String(message.from?.id) === String(env.ADMIN_USER_ID);
@@ -635,16 +660,16 @@ async function processEditedMessage(message, env) {
 
   if (isUserEdit) {
     const user = await getUser(env.BOT_DB, mapping.user_id);
-    if (!user || user.blocked) return;
+    if (!user || user.blocked || user.erased) return;
   }
 
-  const method = message.text ? "editMessageText" : "editMessageCaption";
+  const method = isText ? "editMessageText" : "editMessageCaption";
   const payload = {
     chat_id: mapping.target_chat_id,
     message_id: mapping.target_message_id,
-    ...(message.text
+    ...(isText
       ? { text: message.text, entities: message.entities }
-      : { caption: message.caption, caption_entities: message.caption_entities })
+      : { caption: message.caption || "", caption_entities: message.caption_entities })
   };
   try {
     await telegram(env, method, payload);
@@ -654,11 +679,13 @@ async function processEditedMessage(message, env) {
 }
 
 async function ensureUserTopic(user, from, env) {
+  await requireCurrentUser(env.BOT_DB, user);
+  from = { ...from, id: from.id ?? user.user_id };
   if (user.topic_id && user.topic_card_message_id != null) return user;
   if (user.topic_id) {
     try {
       const card = await sendTopicUserCard(user.topic_id, from, env);
-      await saveTopicCardMessage(env.BOT_DB, user.user_id, user.topic_id, card.message_id);
+      await saveTopicCardMessage(env.BOT_DB, user, user.topic_id, card.message_id);
       return { ...user, topic_card_message_id: card.message_id };
     } catch (error) {
       if (!isTopicMissing(error)) throw error;
@@ -667,10 +694,12 @@ async function ensureUserTopic(user, from, env) {
     }
   }
   const now = Math.floor(Date.now() / 1000);
+  const token = crypto.randomUUID();
   const claimed = await env.BOT_DB.prepare(`
-    UPDATE users SET topic_lease_until = ?, updated_at = ?
-    WHERE user_id = ? AND topic_id IS NULL AND topic_lease_until <= ?
-  `).bind(now + TOPIC_LEASE_SECONDS, now, user.user_id, now).run();
+    UPDATE users SET topic_lease_until = ?, topic_lease_token = ?, updated_at = ?
+    WHERE user_id = ? AND generation = ? AND erased = 0 AND blocked = 0
+      AND topic_id IS NULL AND topic_lease_until <= ?
+  `).bind(now + TOPIC_LEASE_SECONDS, token, now, user.user_id, user.generation, now).run();
 
   if (Number(claimed.meta?.changes || 0) === 1) {
     try {
@@ -678,13 +707,15 @@ async function ensureUserTopic(user, from, env) {
         chat_id: env.ADMIN_GROUP_ID,
         name: buildTopicName(from, env.BOT_LANGUAGE)
       });
-      await env.BOT_DB.prepare(`
+      const assigned = await env.BOT_DB.prepare(`
         UPDATE users SET topic_id = ?, topic_card_message_id = NULL,
-          topic_lease_until = 0, updated_at = ?
-        WHERE user_id = ?
-      `).bind(topic.message_thread_id, now, user.user_id).run();
+          topic_lease_until = 0, topic_lease_token = NULL, updated_at = ?
+        WHERE user_id = ? AND generation = ? AND erased = 0 AND blocked = 0
+          AND topic_lease_token = ?
+      `).bind(topic.message_thread_id, now, user.user_id, user.generation, token).run();
+      if (Number(assigned.meta?.changes || 0) !== 1) throw new ObsoleteWorkError();
       const card = await sendTopicUserCard(topic.message_thread_id, from, env);
-      await saveTopicCardMessage(env.BOT_DB, user.user_id, topic.message_thread_id, card.message_id);
+      await saveTopicCardMessage(env.BOT_DB, user, topic.message_thread_id, card.message_id);
       return {
         ...user,
         topic_id: topic.message_thread_id,
@@ -692,8 +723,8 @@ async function ensureUserTopic(user, from, env) {
       };
     } catch (error) {
       await env.BOT_DB.prepare(
-        "UPDATE users SET topic_lease_until = 0 WHERE user_id = ? AND topic_id IS NULL"
-      ).bind(user.user_id).run().catch(() => {});
+        "UPDATE users SET topic_lease_until = 0, topic_lease_token = NULL WHERE user_id = ? AND topic_id IS NULL AND topic_lease_token = ?"
+      ).bind(user.user_id, token).run().catch(() => {});
       throw error;
     }
   }
@@ -701,7 +732,8 @@ async function ensureUserTopic(user, from, env) {
   for (let attempt = 0; attempt < 8; attempt += 1) {
     await delay(150);
     const current = await getUser(env.BOT_DB, user.user_id);
-    if (current?.topic_id) return current;
+    if (!current || current.erased || current.blocked || current.generation !== user.generation) throw new ObsoleteWorkError();
+    if (current.topic_id) return current;
   }
   throw new RetryableError("等待 Topic 建立逾時");
 }
@@ -722,11 +754,12 @@ async function sendTopicUserCard(topicId, from, env) {
   });
 }
 
-async function saveTopicCardMessage(db, userId, topicId, messageId) {
-  await db.prepare(`
+async function saveTopicCardMessage(db, user, topicId, messageId) {
+  const result = await db.prepare(`
     UPDATE users SET topic_card_message_id = ?, updated_at = ?
-    WHERE user_id = ? AND topic_id = ?
-  `).bind(messageId, Math.floor(Date.now() / 1000), userId, topicId).run();
+    WHERE user_id = ? AND generation = ? AND erased = 0 AND topic_id = ?
+  `).bind(messageId, Math.floor(Date.now() / 1000), user.user_id, user.generation, topicId).run();
+  if (Number(result.meta?.changes || 0) !== 1) throw new ObsoleteWorkError();
 }
 
 async function sendTopicStatus(message, user, env) {
@@ -738,40 +771,60 @@ async function sendTopicStatus(message, user, env) {
   });
 }
 
-async function enqueueMediaMessage(message, userId, direction, env, now, interval) {
+async function enqueueMediaMessage(message, user, direction, env, now, interval) {
+  await requireCurrentUser(env.BOT_DB, user, direction === "user_to_admin");
   const sourceChatId = String(message.chat.id);
   const mediaGroupId = String(message.media_group_id);
   const nowMs = Date.now();
+  const token = crypto.randomUUID();
   const inserted = await env.BOT_DB.prepare(`
     INSERT OR IGNORE INTO media_groups(
       source_chat_id, media_group_id, user_id, direction, state,
-      updated_at_ms, lease_until_ms, created_at
-    ) VALUES (?, ?, ?, ?, 'initializing', ?, 0, ?)
-  `).bind(sourceChatId, mediaGroupId, userId, direction, nowMs, now).run();
+      updated_at_ms, lease_until_ms, created_at, user_generation, lease_token
+    ) SELECT ?, ?, ?, ?, 'initializing', ?, ?, ?, ?, ?
+      FROM users WHERE user_id = ? AND generation = ? AND erased = 0
+  `).bind(sourceChatId, mediaGroupId, user.user_id, direction, nowMs,
+    nowMs + UPDATE_LEASE_SECONDS * 1000, now, user.generation, token,
+    user.user_id, user.generation).run();
   const created = Number(inserted.meta?.changes || 0) === 1;
 
-  await env.BOT_DB.prepare(`
-    INSERT OR IGNORE INTO media_group_messages(
-      source_chat_id, media_group_id, message_id, created_at
-    ) VALUES (?, ?, ?, ?)
-  `).bind(sourceChatId, mediaGroupId, message.message_id, now).run();
-  await env.BOT_DB.prepare(`
-    UPDATE media_groups SET updated_at_ms = ?
-    WHERE source_chat_id = ? AND media_group_id = ? AND state IN ('initializing', 'collecting')
-  `).bind(nowMs, sourceChatId, mediaGroupId).run();
-
-  if (created) {
-    const accepted = direction !== "user_to_admin"
-      || await claimRateSlot(env.BOT_DB, userId, now, interval, `album:${mediaGroupId}`);
+  try {
     await env.BOT_DB.prepare(`
-      UPDATE media_groups SET state = ?
-      WHERE source_chat_id = ? AND media_group_id = ? AND state = 'initializing'
-    `).bind(accepted ? "collecting" : "rejected", sourceChatId, mediaGroupId).run();
-    return { created: true, rejected: !accepted };
+      INSERT OR IGNORE INTO media_group_messages(
+        source_chat_id, media_group_id, message_id, created_at
+      ) SELECT ?, ?, ?, ? FROM media_groups
+        WHERE source_chat_id = ? AND media_group_id = ? AND user_generation = ?
+    `).bind(sourceChatId, mediaGroupId, message.message_id, now,
+      sourceChatId, mediaGroupId, user.generation).run();
+    await env.BOT_DB.prepare(`
+      UPDATE media_groups SET updated_at_ms = ?
+      WHERE source_chat_id = ? AND media_group_id = ? AND state IN ('initializing', 'collecting')
+    `).bind(nowMs, sourceChatId, mediaGroupId).run();
+    if (created) return await initializeMediaGroup(sourceChatId, mediaGroupId, user, direction, env, now, interval, token);
+  } catch (error) {
+    if (created) await releaseMediaLease(env.BOT_DB, sourceChatId, mediaGroupId, token).catch(() => {});
+    throw error;
   }
 
   for (let attempt = 0; attempt < 20; attempt += 1) {
     const group = await getMediaGroup(env.BOT_DB, sourceChatId, mediaGroupId);
+    if (!group || group.user_generation !== user.generation) throw new ObsoleteWorkError();
+    if (group.state === "initializing" && Number(group.lease_until_ms) <= Date.now()) {
+      const claimed = await env.BOT_DB.prepare(`
+        UPDATE media_groups SET lease_until_ms = ?, lease_token = ?
+        WHERE source_chat_id = ? AND media_group_id = ? AND state = 'initializing'
+          AND lease_until_ms <= ? AND user_generation = ?
+      `).bind(Date.now() + UPDATE_LEASE_SECONDS * 1000, token,
+        sourceChatId, mediaGroupId, Date.now(), user.generation).run();
+      if (Number(claimed.meta?.changes || 0) === 1) {
+        try {
+          return await initializeMediaGroup(sourceChatId, mediaGroupId, user, direction, env, now, interval, token);
+        } catch (error) {
+          await releaseMediaLease(env.BOT_DB, sourceChatId, mediaGroupId, token).catch(() => {});
+          throw error;
+        }
+      }
+    }
     if (group?.state === "processing") {
       // Expired work is reclaimed by flushMediaGroup below.
       if (Number(group.lease_until_ms) <= Date.now()) return { created: false };
@@ -794,6 +847,24 @@ async function enqueueMediaMessage(message, userId, direction, env, now, interva
   throw new RetryableError("相簿初始化或處理逾時");
 }
 
+async function initializeMediaGroup(sourceChatId, mediaGroupId, user, direction, env, now, interval, token) {
+  const accepted = direction !== "user_to_admin"
+    || await claimRateSlot(env.BOT_DB, user, now, interval, `album:${mediaGroupId}`);
+  const result = await env.BOT_DB.prepare(`
+    UPDATE media_groups SET state = ?, lease_until_ms = 0, lease_token = NULL
+    WHERE source_chat_id = ? AND media_group_id = ? AND state = 'initializing' AND lease_token = ?
+  `).bind(accepted ? "collecting" : "rejected", sourceChatId, mediaGroupId, token).run();
+  if (Number(result.meta?.changes || 0) !== 1) throw new ObsoleteWorkError();
+  return { created: true, rejected: !accepted };
+}
+
+async function releaseMediaLease(db, sourceChatId, mediaGroupId, token) {
+  await db.prepare(`
+    UPDATE media_groups SET lease_until_ms = 0, lease_token = NULL
+    WHERE source_chat_id = ? AND media_group_id = ? AND lease_token = ?
+  `).bind(sourceChatId, mediaGroupId, token).run();
+}
+
 async function flushMediaGroup(sourceChatId, mediaGroupId, env) {
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const group = await getMediaGroup(env.BOT_DB, sourceChatId, mediaGroupId);
@@ -801,7 +872,7 @@ async function flushMediaGroup(sourceChatId, mediaGroupId, env) {
     if (group.state === "processing" && Number(group.lease_until_ms) > Date.now()) return;
     if (group.state === "processing") {
       await env.BOT_DB.prepare(`
-        UPDATE media_groups SET state = 'collecting', lease_until_ms = 0
+        UPDATE media_groups SET state = 'collecting', lease_until_ms = 0, lease_token = NULL
         WHERE source_chat_id = ? AND media_group_id = ?
           AND state = 'processing' AND lease_until_ms <= ?
       `).bind(sourceChatId, mediaGroupId, Date.now()).run();
@@ -811,12 +882,14 @@ async function flushMediaGroup(sourceChatId, mediaGroupId, env) {
     const remaining = Number(group.updated_at_ms) + MEDIA_GROUP_QUIET_MS - Date.now();
     if (remaining > 0) await delay(remaining);
     const claimTime = Date.now();
+    const token = crypto.randomUUID();
     const claimed = await env.BOT_DB.prepare(`
-      UPDATE media_groups SET state = 'processing', lease_until_ms = ?
+      UPDATE media_groups SET state = 'processing', lease_until_ms = ?, lease_token = ?
       WHERE source_chat_id = ? AND media_group_id = ?
         AND state = 'collecting' AND updated_at_ms <= ?
     `).bind(
       claimTime + UPDATE_LEASE_SECONDS * 1000,
+      token,
       sourceChatId,
       mediaGroupId,
       claimTime - MEDIA_GROUP_QUIET_MS
@@ -824,38 +897,44 @@ async function flushMediaGroup(sourceChatId, mediaGroupId, env) {
     if (Number(claimed.meta?.changes || 0) !== 1) continue;
 
     try {
-      await deliverMediaGroup(group, env);
+      await deliverMediaGroup(group, { ...env, _albumLease: { sourceChatId, mediaGroupId, token } });
       await env.BOT_DB.prepare(`
-        UPDATE media_groups SET state = 'done', lease_until_ms = 0, last_error = NULL
-        WHERE source_chat_id = ? AND media_group_id = ?
-      `).bind(sourceChatId, mediaGroupId).run();
+        UPDATE media_groups SET state = 'done', lease_until_ms = 0, lease_token = NULL, last_error = NULL
+        WHERE source_chat_id = ? AND media_group_id = ? AND lease_token = ?
+      `).bind(sourceChatId, mediaGroupId, token).run();
       return;
     } catch (error) {
       await notifyMediaFailure(group, error, env);
       await env.BOT_DB.prepare(`
-        UPDATE media_groups SET state = ?, lease_until_ms = 0, last_error = ?
-        WHERE source_chat_id = ? AND media_group_id = ?
+        UPDATE media_groups SET state = ?, lease_until_ms = 0, lease_token = NULL, last_error = ?
+        WHERE source_chat_id = ? AND media_group_id = ? AND lease_token = ?
       `).bind(
         isRetryableError(error) ? "collecting" : "rejected",
         sanitizeError(error),
         sourceChatId,
-        mediaGroupId
+        mediaGroupId,
+        token
       ).run().catch(() => {});
       throw error;
     }
   }
+  throw new RetryableError("相簿尚未取得處理租約");
 }
 
 async function deliverMediaGroup(group, env) {
   const rows = await env.BOT_DB.prepare(`
-    SELECT message_id FROM media_group_messages
-    WHERE source_chat_id = ? AND media_group_id = ? ORDER BY message_id ASC
+    SELECT message_id FROM media_group_messages AS messages
+    WHERE source_chat_id = ? AND media_group_id = ?
+      AND NOT EXISTS (SELECT 1 FROM message_map WHERE source_chat_id = messages.source_chat_id
+        AND source_message_id = messages.message_id)
+    ORDER BY message_id ASC
   `).bind(group.source_chat_id, group.media_group_id).all();
   const messageIds = (rows.results || []).map((row) => Number(row.message_id));
   if (!messageIds.length) return;
 
   const user = await getUser(env.BOT_DB, group.user_id);
-  if (!user) throw new NonRetryableError("找不到相簿對應使用者");
+  if (!user || user.erased || user.generation !== group.user_generation) throw new ObsoleteWorkError();
+  await requireCurrentUser(env.BOT_DB, user, group.direction === "user_to_admin");
   let targetChatId = user.user_id;
   let topicId;
   if (group.direction === "user_to_admin") {
@@ -901,30 +980,27 @@ async function deliverMediaGroup(group, env) {
     throw new NonRetryableError("Telegram 未完整複製相簿");
   }
   const now = Math.floor(Date.now() / 1000);
-  await env.BOT_DB.batch(messageIds.map((sourceMessageId, index) => env.BOT_DB.prepare(`
-    INSERT OR REPLACE INTO message_map(
-      source_chat_id, source_message_id, target_chat_id, target_message_id, user_id, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?)
-  `).bind(
-    group.source_chat_id,
+  await saveCopiedMappings(env, user, messageIds.map((sourceMessageId, index) => ({
+    sourceChatId: group.source_chat_id,
     sourceMessageId,
     targetChatId,
-    copied[index].message_id,
-    user.user_id,
+    targetMessageId: copied[index].message_id,
+    userId: user.user_id,
     now
-  )));
+  })));
 }
 
 async function rollbackCopiedMessages(targetChatId, copied, env) {
   const copiedIds = Array.isArray(copied)
     ? copied.map((item) => Number(item?.message_id)).filter(Number.isSafeInteger)
     : [];
-  if (!copiedIds.length) return;
+  if (!copiedIds.length) return true;
   try {
     await telegram(env, "deleteMessages", {
       chat_id: targetChatId,
       message_ids: copiedIds
     });
+    return true;
   } catch (error) {
     console.log(JSON.stringify({
       event: "partial_album_rollback_failed",
@@ -932,6 +1008,7 @@ async function rollbackCopiedMessages(targetChatId, copied, env) {
       count: copiedIds.length,
       error: sanitizeError(error)
     }));
+    return false;
   }
 }
 
@@ -979,7 +1056,7 @@ async function sendRateLimitNotice(chatId, env) {
 }
 
 async function notifyUserCopyFailure(chatId, error, env) {
-  if (isRetryableError(error) || isTopicMissing(error)) return;
+  if (error instanceof ObsoleteWorkError || isRetryableError(error) || isTopicMissing(error)) return;
   await telegram(env, "sendMessage", {
     chat_id: chatId,
     text: env.UNSUPPORTED_MESSAGE || t(env.BOT_LANGUAGE, "unsupportedMessage")
@@ -987,7 +1064,7 @@ async function notifyUserCopyFailure(chatId, error, env) {
 }
 
 async function notifyAdminDeliveryFailure(message, error, env) {
-  if (isRetryableError(error)) return;
+  if (error instanceof ObsoleteWorkError || isRetryableError(error)) return;
   await telegram(env, "sendMessage", {
     chat_id: message.chat.id,
     message_thread_id: message.message_thread_id,
@@ -996,7 +1073,7 @@ async function notifyAdminDeliveryFailure(message, error, env) {
 }
 
 async function notifyMediaFailure(group, error, env) {
-  if (isRetryableError(error)) return;
+  if (error instanceof ObsoleteWorkError || isRetryableError(error)) return;
   const user = await getUser(env.BOT_DB, group.user_id).catch(() => null);
   if (group.direction === "user_to_admin") {
     await notifyUserCopyFailure(group.source_chat_id, error, env);
@@ -1037,28 +1114,35 @@ class NonRetryableError extends Error {
   }
 }
 
+class ObsoleteWorkError extends NonRetryableError {
+  constructor() { super("使用者資料或處理租約已變更，取消舊工作"); }
+}
+
 async function telegram(env, method, payload) {
   let response;
+  let data;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), TELEGRAM_TIMEOUT_MS);
   try {
-    response = await fetch(`${TELEGRAM_API}/bot${env.BOT_TOKEN}/${method}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-      signal: controller.signal
-    });
-  } catch (error) {
-    throw new RetryableError(`Telegram ${method} 網路錯誤：${sanitizeError(error)}`);
+    try {
+      response = await fetch(`${TELEGRAM_API}/bot${env.BOT_TOKEN}/${method}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+    } catch (error) {
+      throw new RetryableError(`Telegram ${method} 網路錯誤：${sanitizeError(error)}`);
+    }
+    try {
+      data = await response.json();
+    } catch {
+      throw new RetryableError(`Telegram ${method} 回應讀取失敗（HTTP ${response.status}）`);
+    }
   } finally {
     clearTimeout(timeoutId);
   }
-  let data;
-  try {
-    data = await response.json();
-  } catch {
-    throw new RetryableError(`Telegram ${method} 回應格式無效（HTTP ${response.status}）`);
-  }
+  if (!data || typeof data !== "object") throw new RetryableError(`Telegram ${method} 回應格式無效`);
   if (!response.ok || !data.ok) {
     throw new TelegramApiError(
       method,
@@ -1072,53 +1156,56 @@ async function telegram(env, method, payload) {
 
 async function claimUpdate(db, updateId) {
   const now = Math.floor(Date.now() / 1000);
+  const token = crypto.randomUUID();
   const inserted = await db.prepare(`
     INSERT OR IGNORE INTO processed_updates(
-      update_id, processed_at, status, attempts, updated_at
-    ) VALUES (?, ?, 'processing', 1, ?)
-  `).bind(updateId, now, now).run();
-  if (Number(inserted.meta?.changes || 0) === 1) return "accepted";
+      update_id, processed_at, status, attempts, updated_at, lease_token
+    ) VALUES (?, ?, 'processing', 1, ?, ?)
+  `).bind(updateId, now, now, token).run();
+  if (Number(inserted.meta?.changes || 0) === 1) return { status: "accepted", token };
   const reclaimed = await db.prepare(`
     UPDATE processed_updates
-    SET status = 'processing', attempts = attempts + 1, updated_at = ?, last_error = NULL
+    SET status = 'processing', attempts = attempts + 1, updated_at = ?, last_error = NULL, lease_token = ?
     WHERE update_id = ? AND (
       (status = 'failed' AND attempts < ?)
       OR (status = 'processing' AND updated_at <= ? AND attempts < ?)
     )
   `).bind(
     now,
+    token,
     updateId,
     MAX_UPDATE_ATTEMPTS,
     now - UPDATE_LEASE_SECONDS,
     MAX_UPDATE_ATTEMPTS
   ).run();
-  if (Number(reclaimed.meta?.changes || 0) === 1) return "accepted";
+  if (Number(reclaimed.meta?.changes || 0) === 1) return { status: "accepted", token };
   const current = await db.prepare(
-    "SELECT status, attempts FROM processed_updates WHERE update_id = ?"
+    "SELECT status, attempts, updated_at, lease_token FROM processed_updates WHERE update_id = ?"
   ).bind(updateId).first();
   if (
     current
     && Number(current.attempts) >= MAX_UPDATE_ATTEMPTS
-    && (current.status === "failed" || current.status === "processing")
+    && (current.status === "failed" || (current.status === "processing" && current.updated_at <= now - UPDATE_LEASE_SECONDS))
   ) {
-    await db.prepare(`
+    const discarded = await db.prepare(`
       UPDATE processed_updates SET status = 'discarded', updated_at = ?
-      WHERE update_id = ? AND attempts >= ?
-    `).bind(now, updateId, MAX_UPDATE_ATTEMPTS).run();
+      WHERE update_id = ? AND attempts >= ? AND updated_at = ? AND status = ? AND lease_token IS ?
+    `).bind(now, updateId, MAX_UPDATE_ATTEMPTS, current.updated_at, current.status, current.lease_token).run();
+    if (Number(discarded.meta?.changes || 0) !== 1) return { status: "busy" };
     console.log(JSON.stringify({ event: "update_retry_exhausted", update_id: updateId }));
-    return "exhausted";
+    return { status: "exhausted" };
   }
-  return current?.status === "processing" ? "busy" : "duplicate";
+  return { status: current?.status === "processing" ? "busy" : "duplicate" };
 }
 
-async function finishUpdate(db, updateId, status) {
-  await db.prepare(`
+async function finishUpdate(db, updateId, status, token) {
+  return db.prepare(`
     UPDATE processed_updates SET status = ?, updated_at = ?, last_error = NULL
-    WHERE update_id = ?
-  `).bind(status, Math.floor(Date.now() / 1000), updateId).run();
+    WHERE update_id = ? AND lease_token = ? AND status = 'processing'
+  `).bind(status, Math.floor(Date.now() / 1000), updateId, token).run();
 }
 
-async function recordUpdateFailure(db, updateId, retryable, error) {
+async function recordUpdateFailure(db, updateId, retryable, error, token) {
   await db.prepare(`
     UPDATE processed_updates SET
       status = CASE
@@ -1127,14 +1214,15 @@ async function recordUpdateFailure(db, updateId, retryable, error) {
       END,
       updated_at = ?,
       last_error = ?
-    WHERE update_id = ?
+    WHERE update_id = ? AND lease_token = ?
   `).bind(
     retryable ? 1 : 0,
     MAX_UPDATE_ATTEMPTS,
     retryable ? "failed" : "discarded",
     Math.floor(Date.now() / 1000),
     sanitizeError(error),
-    updateId
+    updateId,
+    token || ""
   ).run();
   const stored = await db.prepare(
     "SELECT status FROM processed_updates WHERE update_id = ?"
@@ -1150,7 +1238,7 @@ async function getUserByTopic(db, topicId) {
   return db.prepare("SELECT * FROM users WHERE topic_id = ?").bind(topicId).first();
 }
 
-async function upsertUser(db, from, now) {
+async function upsertUser(db, from, now, messageId) {
   const userId = String(from.id);
   await db.prepare(`
     INSERT INTO users(user_id, username, first_name, last_name, created_at, updated_at, last_message_at)
@@ -1159,24 +1247,40 @@ async function upsertUser(db, from, now) {
       username = excluded.username,
       first_name = excluded.first_name,
       last_name = excluded.last_name,
-      updated_at = excluded.updated_at
+      updated_at = excluded.updated_at,
+      erased = 0
+    WHERE users.forgotten_message_id < ? AND users.blocked = 0
   `).bind(
     userId,
     from.username || null,
     from.first_name || "",
     from.last_name || "",
     now,
-    now
+    now,
+    messageId
   ).run();
   return getUser(db, userId);
 }
 
-async function claimRateSlot(db, userId, now, interval, rateKey) {
-  const result = await db.prepare(`
-    UPDATE users SET last_message_at = ?, last_rate_key = ?, updated_at = ?
-    WHERE user_id = ? AND (last_rate_key = ? OR last_message_at <= ?)
-  `).bind(now, rateKey, now, userId, rateKey, now - interval).run();
-  return Number(result.meta?.changes || 0) === 1;
+async function claimRateSlot(db, user, now, interval, rateKey) {
+  await requireCurrentUser(db, user, true);
+  const admitted = await db.prepare(`
+    SELECT 1 AS ok FROM rate_admissions WHERE user_id = ? AND generation = ? AND rate_key = ?
+  `).bind(user.user_id, user.generation, rateKey).first();
+  if (admitted) return true;
+  const results = await db.batch([
+    db.prepare(`
+      UPDATE users SET last_message_at = ?, last_rate_key = ?, updated_at = ?
+      WHERE user_id = ? AND generation = ? AND erased = 0 AND blocked = 0
+        AND (last_rate_key = ? OR last_message_at <= ?)
+    `).bind(now, rateKey, now, user.user_id, user.generation, rateKey, now - interval),
+    db.prepare(`
+      INSERT OR IGNORE INTO rate_admissions(user_id, generation, rate_key, created_at)
+      SELECT user_id, generation, ?, ? FROM users
+      WHERE user_id = ? AND generation = ? AND erased = 0 AND blocked = 0 AND last_rate_key = ?
+    `).bind(rateKey, now, user.user_id, user.generation, rateKey)
+  ]);
+  return Number(results[0].meta?.changes || 0) === 1 || Number(results[1].meta?.changes || 0) === 1;
 }
 
 async function claimBlockedNotice(db, userId, now) {
@@ -1201,19 +1305,50 @@ async function getMessageMap(db, sourceChatId, sourceMessageId) {
   `).bind(sourceChatId, sourceMessageId).first();
 }
 
-async function saveMessageMap(db, values) {
-  await db.prepare(`
-    INSERT OR REPLACE INTO message_map(
-      source_chat_id, source_message_id, target_chat_id, target_message_id, user_id, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?)
-  `).bind(
-    values.sourceChatId,
-    values.sourceMessageId,
-    values.targetChatId,
-    values.targetMessageId,
-    values.userId,
-    values.now
-  ).run();
+async function requireCurrentUser(db, user, checkBlocked = false) {
+  const current = await getUser(db, user.user_id);
+  if (!current || current.erased || current.generation !== user.generation || (checkBlocked && current.blocked)) {
+    throw new ObsoleteWorkError();
+  }
+}
+
+async function saveCopiedMappings(env, user, values) {
+  let failure;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const results = await env.BOT_DB.batch(values.map((item) => env.BOT_DB.prepare(`
+        INSERT OR REPLACE INTO message_map(
+          source_chat_id, source_message_id, target_chat_id, target_message_id, user_id, created_at
+        ) SELECT ?, ?, ?, ?, ?, ? FROM users
+          WHERE user_id = ? AND generation = ? AND erased = 0 AND blocked = ?
+            AND (? = 0 OR EXISTS (SELECT 1 FROM processed_updates WHERE update_id = ?
+              AND lease_token = ? AND status = 'processing'))
+            AND (? = 0 OR EXISTS (SELECT 1 FROM media_groups WHERE source_chat_id = ?
+              AND media_group_id = ? AND lease_token = ? AND state = 'processing'))
+      `).bind(item.sourceChatId, item.sourceMessageId, item.targetChatId, item.targetMessageId,
+        item.userId, item.now, user.user_id, user.generation, user.blocked,
+        env._updateLease ? 1 : 0, env._updateLease?.id ?? 0, env._updateLease?.token ?? "",
+        env._albumLease ? 1 : 0, env._albumLease?.sourceChatId ?? "",
+        env._albumLease?.mediaGroupId ?? "", env._albumLease?.token ?? "")));
+      if (results.some((result) => Number(result.meta?.changes || 0) !== 1)) throw new ObsoleteWorkError();
+      return;
+    } catch (error) {
+      failure = error;
+      if (error instanceof ObsoleteWorkError) break;
+      if (attempt < 2) await delay(100 * (attempt + 1));
+    }
+  }
+  const reverted = await rollbackCopiedMessages(values[0].targetChatId,
+    values.map((item) => ({ message_id: item.targetMessageId })), env);
+  if (!reverted) {
+    await telegram(env, "sendMessage", {
+      chat_id: values[0].sourceChatId,
+      message_thread_id: String(values[0].sourceChatId) === String(env.ADMIN_GROUP_ID) ? user.topic_id : undefined,
+      text: t(env.BOT_LANGUAGE, "untrackedDelivery")
+    }).catch(() => {});
+    throw new NonRetryableError("已轉送但保存對照與撤回均失敗，停止重送以避免重複");
+  }
+  throw failure;
 }
 
 async function targetReplyParameters(db, sourceChatId, sourceMessageId, expectedTargetChatId) {
@@ -1249,7 +1384,9 @@ async function cleanDatabase(db) {
     `).bind(now - 7 * 86400),
     db.prepare("DELETE FROM message_map WHERE created_at < ?").bind(now - 30 * 86400),
     db.prepare("DELETE FROM media_group_messages WHERE created_at < ?").bind(now - 2 * 86400),
-    db.prepare("DELETE FROM media_groups WHERE created_at < ?").bind(now - 2 * 86400)
+    db.prepare("DELETE FROM media_groups WHERE created_at < ?").bind(now - 2 * 86400),
+    db.prepare("DELETE FROM rate_admissions WHERE created_at < ?").bind(now - 2 * 86400),
+    db.prepare("DELETE FROM users WHERE erased = 1 AND blocked = 0 AND forgotten_at < ?").bind(now - 7 * 86400)
   ]);
 }
 
@@ -1258,7 +1395,14 @@ async function readiness(env) {
     return json({ ok: false, service: "telegram-private-relay" }, { status: 503 });
   }
   try {
-    await env.BOT_DB.prepare("SELECT 1 AS ok").first();
+    await env.BOT_DB.prepare(`
+      SELECT (SELECT generation FROM users LIMIT 1) AS generation,
+        (SELECT forgotten_message_id FROM users LIMIT 1) AS forgotten_message_id,
+        (SELECT lease_token FROM processed_updates LIMIT 1) AS update_lease,
+        (SELECT user_generation FROM media_groups LIMIT 1) AS album_generation,
+        (SELECT lease_token FROM media_groups LIMIT 1) AS album_lease,
+        (SELECT COUNT(*) FROM rate_admissions WHERE 0) AS admissions
+    `).first();
     return json({ ok: true, service: "telegram-private-relay" });
   } catch {
     return json({ ok: false, service: "telegram-private-relay" }, { status: 503 });
@@ -1269,9 +1413,9 @@ export function configurationIssue(env) {
   if (!env?.BOT_DB || typeof env.BOT_DB.prepare !== "function") return "BOT_DB";
   if (typeof env.BOT_TOKEN !== "string" || !env.BOT_TOKEN.trim()) return "BOT_TOKEN";
   if (!/^[A-Za-z0-9_-]{1,256}$/.test(String(env.WEBHOOK_SECRET || ""))) return "WEBHOOK_SECRET";
-  if (!/^\d+$/.test(String(env.ADMIN_USER_ID || "").trim())) return "ADMIN_USER_ID";
+  if (!/^\d+$/.test(String(env.ADMIN_USER_ID || ""))) return "ADMIN_USER_ID";
   if (env.ADMIN_GROUP_ID != null && String(env.ADMIN_GROUP_ID) !== "") {
-    if (!/^-100\d+$/.test(String(env.ADMIN_GROUP_ID).trim())) return "ADMIN_GROUP_ID";
+    if (!/^-100\d+$/.test(String(env.ADMIN_GROUP_ID))) return "ADMIN_GROUP_ID";
   }
   if (env.BOT_LANGUAGE != null && !["zh", "ja", "en"].includes(env.BOT_LANGUAGE)) return "BOT_LANGUAGE";
   for (const name of ["WELCOME_MESSAGE", "BLOCKED_MESSAGE", "RATE_LIMIT_MESSAGE", "UNSUPPORTED_MESSAGE"]) {
@@ -1293,6 +1437,20 @@ export function parseCommand(text) {
   if (typeof text !== "string" || !text.startsWith("/")) return null;
   const token = text.trim().split(/\s+/, 1)[0].slice(1).split("@", 1)[0];
   return token.toLowerCase() || null;
+}
+
+async function commandIsForBot(text, env) {
+  if (!parseCommand(text)) return true;
+  const token = text.trim().split(/\s+/, 1)[0];
+  if (!token.includes("@")) return true;
+  const addressedTo = token.slice(token.indexOf("@") + 1);
+  if (!/^[A-Za-z0-9_]+$/.test(addressedTo)) return false;
+  if (!botIdentity || botIdentity.token !== env.BOT_TOKEN) {
+    const me = await telegram(env, "getMe", {});
+    if (!me?.username) throw new RetryableError("無法確認 Bot 的指令名稱");
+    botIdentity = { token: env.BOT_TOKEN, username: me.username.toLowerCase() };
+  }
+  return addressedTo.toLowerCase() === botIdentity.username;
 }
 
 export function buildTopicName(from, language) {

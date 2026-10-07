@@ -241,6 +241,7 @@ test("私聊備用模式只把管理者對應回覆送給原使用者", async ()
     });
   };
   const db = {
+    async batch(statements) { return Promise.all(statements.map((statement) => statement.run())); },
     prepare(sql) {
       return {
         bind() {

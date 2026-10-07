@@ -7,6 +7,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ($WorkerUrl.Scheme -ne 'https' -or -not $WorkerUrl.Host -or
+    $WorkerUrl.UserInfo -or $WorkerUrl.Query -or $WorkerUrl.Fragment -or $WorkerUrl.AbsolutePath -ne '/') {
+    throw 'WorkerUrl 必須是沒有路徑、帳密、查詢參數或片段的 HTTPS 網站根網址。'
+}
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $secretFile = Join-Path $projectRoot 'private-credentials/telegram-webhook-secret.dpapi'
 $cloudflareInvoker = Join-Path $PSScriptRoot 'Invoke-WithCloudflareToken.ps1'
@@ -33,6 +37,7 @@ function Invoke-ProbeRequest {
         Uri = $Uri
         Headers = $Headers
         SkipHttpErrorCheck = $true
+        MaximumRedirection = 0
     }
     if ($Method -ne 'GET') {
         $parameters.ContentType = 'application/json'
