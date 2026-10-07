@@ -140,7 +140,7 @@ async function processMessage(message, env) {
     await telegram(env, "sendMessage", {
       chat_id: message.chat.id,
       message_thread_id: message.message_thread_id,
-      text: `${t(env.BOT_LANGUAGE, "groupId")}：<code>${escapeHtml(String(message.chat.id))}</code>`,
+      text: `${t(env.BOT_LANGUAGE, "groupId")}${t(env.BOT_LANGUAGE, "fieldSeparator")}<code>${escapeHtml(String(message.chat.id))}</code>`,
       parse_mode: "HTML"
     });
     return;
@@ -230,10 +230,23 @@ async function sendAdminStatus(chatId, topicId, env) {
   } catch (error) {
     console.log(JSON.stringify({ event: "admin_status_webhook_unavailable", error: sanitizeError(error) }));
   }
+  const language = env.BOT_LANGUAGE;
+  const separator = t(language, "fieldSeparator");
   await telegram(env, "sendMessage", {
     chat_id: chatId,
     message_thread_id: topicId,
-    text: `${t(env.BOT_LANGUAGE, "adminStatus")}\n${t(env.BOT_LANGUAGE, "statusDone")}: ${byStatus.done || 0}\n${t(env.BOT_LANGUAGE, "statusProcessing")}: ${byStatus.processing || 0}\n${t(env.BOT_LANGUAGE, "statusStalled")}: ${stalled}\n${t(env.BOT_LANGUAGE, "statusFailed")}: ${byStatus.failed || 0}\n${t(env.BOT_LANGUAGE, "statusDiscarded")}: ${byStatus.discarded || 0}\n${t(env.BOT_LANGUAGE, "statusPending")}: ${pending}`
+    text: [
+      t(language, "adminStatus"),
+      "",
+      ...[
+        ["statusDone", byStatus.done || 0],
+        ["statusProcessing", byStatus.processing || 0],
+        ["statusStalled", stalled],
+        ["statusFailed", byStatus.failed || 0],
+        ["statusDiscarded", byStatus.discarded || 0],
+        ["statusPending", pending]
+      ].map(([key, value]) => `${t(language, key)}${separator}${value}`)
+    ].join("\n")
   });
 }
 
@@ -289,7 +302,7 @@ async function processUserMessage(message, env) {
   if (command === "id") {
     await telegram(env, "sendMessage", {
       chat_id: message.chat.id,
-      text: `${t(env.BOT_LANGUAGE, "userId")}：${userId}`
+      text: `${t(env.BOT_LANGUAGE, "userId")}${t(env.BOT_LANGUAGE, "fieldSeparator")}${userId}`
     });
     return;
   }
@@ -484,12 +497,13 @@ export async function processDirectAdminReply(message, env) {
 
 function buildDirectUserStatus(user, language) {
   const username = user.username ? `@${escapeHtml(safeIdentityText(user.username))}` : t(language, "notSet");
+  const separator = t(language, "fieldSeparator");
   return [
     `<b>${t(language, "userDetails")}</b>`,
-    `User ID：<code>${escapeHtml(user.user_id)}</code>`,
-    `${t(language, "name")}：${escapeHtml(safeIdentityText([user.first_name, user.last_name].filter(Boolean).join(" ")) || t(language, "notProvided"))}`,
-    `${t(language, "username")}：${username}`,
-    `${t(language, "status")}：${t(language, user.blocked ? "blockedStatus" : "normalStatus")}`
+    `User ID${separator}<code>${escapeHtml(user.user_id)}</code>`,
+    `${t(language, "name")}${separator}${escapeHtml(safeIdentityText([user.first_name, user.last_name].filter(Boolean).join(" ")) || t(language, "notProvided"))}`,
+    `${t(language, "username")}${separator}${username}`,
+    `${t(language, "status")}${separator}${t(language, user.blocked ? "blockedStatus" : "normalStatus")}`
   ].join("\n");
 }
 
@@ -954,15 +968,16 @@ async function rollbackCopiedMessages(targetChatId, copied, env) {
 
 async function sendDirectUserHeader(user, env) {
   const language = env.BOT_LANGUAGE;
+  const separator = t(language, "fieldSeparator");
   const name = safeIdentityText([user.first_name, user.last_name].filter(Boolean).join(" ")) || t(language, "notProvided");
   const username = user.username ? `@${escapeHtml(safeIdentityText(user.username))}` : t(language, "notSet");
   const header = await telegram(env, "sendMessage", {
     chat_id: env.ADMIN_USER_ID,
     text: [
       `<b>${t(language, "receivedChat")}</b>`,
-      `User ID：<code>${escapeHtml(user.user_id)}</code>`,
-      `${t(language, "name")}：${escapeHtml(name)}`,
-      `${t(language, "username")}：${username}`
+      `User ID${separator}<code>${escapeHtml(user.user_id)}</code>`,
+      `${t(language, "name")}${separator}${escapeHtml(name)}`,
+      `${t(language, "username")}${separator}${username}`
     ].join("\n"),
     parse_mode: "HTML"
   });
@@ -1413,11 +1428,12 @@ export function buildTopicName(from, language) {
 export function buildUserCard(from, language) {
   const fullName = safeIdentityText([from.first_name, from.last_name].filter(Boolean).join(" ")) || t(language, "notProvided");
   const username = from.username ? `@${escapeHtml(safeIdentityText(from.username))}` : t(language, "notSet");
+  const separator = t(language, "fieldSeparator");
   return [
     `<b>${t(language, "newChat")}</b>`,
-    `User ID：<code>${escapeHtml(String(from.id))}</code>`,
-    `${t(language, "name")}：${escapeHtml(fullName)}`,
-    `${t(language, "username")}：${username}`
+    `User ID${separator}<code>${escapeHtml(String(from.id))}</code>`,
+    `${t(language, "name")}${separator}${escapeHtml(fullName)}`,
+    `${t(language, "username")}${separator}${username}`
   ].join("\n");
 }
 

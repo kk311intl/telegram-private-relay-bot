@@ -34,7 +34,7 @@ test("buildUserCard 會跳脫 Telegram HTML", () => {
 });
 
 test("部署語言控制資料卡和預設名稱", () => {
-  assert.match(buildUserCard({ id: 123 }, "ja"), /新しいプライベートチャット/);
+  assert.match(buildUserCard({ id: 123 }, "ja"), /新しい個別チャット/);
   assert.match(buildUserCard({ id: 123 }, "en"), /New private chat/);
   assert.equal(buildTopicName({ id: 123 }, "en"), "User · 123");
 });
@@ -52,12 +52,53 @@ test("三種部署語言都有完整的訊息文字", () => {
     unsupportedMessage: 1, deliveryFailed: 1, albumFailed: 1, untrackedDelivery: 1,
     groupId: 1, newChat: 1, receivedChat: 1, userDetails: 1, name: 1,
     username: 1, status: 1, blockedStatus: 1, normalStatus: 1,
-    notSet: 1, notProvided: 1, user: 1
+    notSet: 1, notProvided: 1, user: 1, fieldSeparator: 1
   });
   for (const language of ["zh", "ja", "en"]) {
     for (const key of keys) assert.ok(t(language, key), `${language}.${key}`);
   }
   assert.equal(t(undefined, "welcome"), t("zh", "welcome"));
+});
+
+test("三語資料卡使用對應標點並保留 HTML 跳脫", () => {
+  for (const language of ["zh", "ja", "en"]) {
+    const separator = language === "en" ? ": " : "：";
+    const card = buildUserCard({ id: 123, first_name: "<Example>", username: "a&b" }, language);
+    assert.equal(t(language, "fieldSeparator"), separator);
+    assert.ok(card.includes(`User ID${separator}<code>123</code>`));
+    assert.ok(card.includes(`${t(language, "name")}${separator}&lt;Example&gt;`));
+    assert.ok(card.includes(`${t(language, "username")}${separator}@a&amp;b`));
+    if (language === "en") assert.doesNotMatch(card, /：/);
+  }
+});
+
+test("三語操作提示分行並保留資料清除的安全範圍", () => {
+  const limits = {
+    zh: [/不會刪除|不會刪/, /備份/, /不會解除封鎖/, /User ID/, /舊請求/, /7 天.*排程/, /新訊息/],
+    ja: [/削除しません/, /バックアップ/, /ブロックは解除されません/, /User ID/, /古いリクエスト/, /7日後.*定期処理/, /新しいメッセージ/],
+    en: [/not deleted/, /backups/, /block remains/, /User ID/, /old requests/, /scheduled cleanup.*7 days/, /new messages/]
+  };
+  for (const language of ["zh", "ja", "en"]) {
+    for (const key of ["adminHelpTopic", "adminHelpDirect"]) {
+      const help = t(language, key);
+      for (const command of ["user", "block", "unblock", "status"]) {
+        assert.match(help, new RegExp(`^/${command} — `, "m"));
+      }
+      assert.match(help, /^\/unblock USER_ID — /m);
+    }
+    assert.match(t(language, "adminHelpTopic"), /^\/close — /m);
+    assert.doesNotMatch(t(language, "adminHelpDirect"), /\/close/);
+    assert.match(t(language, "forgetConfirm"), /\/forget confirm/);
+    for (const key of ["forgetConfirm", "forgetDone"]) {
+      const text = t(language, key);
+      assert.ok(text.includes("\n\n"));
+      assert.ok(text.includes("Telegram"));
+      for (const limit of limits[language]) assert.match(text, limit);
+    }
+    assert.doesNotMatch(t(language, "adminStatus"), /D1/);
+  }
+  assert.match(t("en", "forgetConfirm"), /stores about you/);
+  assert.doesNotMatch(t("en", "welcome"), /\bwe\b|we'll/i);
 });
 
 test("escapeHtml 跳脫特殊字元", () => {

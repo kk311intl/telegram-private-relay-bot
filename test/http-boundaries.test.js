@@ -140,7 +140,7 @@ test("未設定管理群組時，管理者仍可使用 /start", async () => {
       BOT_TOKEN: "test-token",
       ADMIN_USER_ID: "1"
     });
-    assert.match(sentPayload.text, /管理者私聊備用模式/);
+    assert.match(sentPayload.text, /管理者私訊模式/);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -162,8 +162,8 @@ test("管理者回覆依部署語言，不依 Telegram 使用者語言", async (
         text: "/start"
       } }, { BOT_TOKEN: "test-token", ADMIN_USER_ID: "1", BOT_LANGUAGE: language });
     }
-    assert.match(sent[0], /管理者との直接チャットモード/);
-    assert.match(sent[1], /direct-admin mode/);
+    assert.match(sent[0], /管理者個別チャットモード/);
+    assert.match(sent[1], /Admin private-chat mode/);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -230,7 +230,7 @@ test("已設定舊管理群組時仍可在新群組查詢 /setup", async () => {
   }
 });
 
-test("私聊備用模式只把管理者對應回覆送給原使用者", async () => {
+test("管理者私訊模式只把管理者對應回覆送給原使用者", async () => {
   const originalFetch = globalThis.fetch;
   let copiedPayload;
   globalThis.fetch = async (url, init) => {
@@ -324,7 +324,7 @@ test("封鎖後編輯舊訊息不會同步", async () => {
   }
 });
 
-test("私聊備用模式會同步管理者編輯", async () => {
+test("管理者私訊模式會同步管理者編輯", async () => {
   const originalFetch = globalThis.fetch;
   let calledMethod;
   let sentPayload;

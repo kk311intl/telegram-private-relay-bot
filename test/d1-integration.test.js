@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import worker, { processUpdate } from "../src/index.js";
+import { t } from "../src/i18n.js";
 
 class BoundStatement {
   constructor(database, sql) {
@@ -181,7 +182,7 @@ test("清除回覆失敗的重試不會刪掉之後的新資料", () => withData
   let failConfirmation = true;
   globalThis.fetch = async (url, init) => {
     const payload = JSON.parse(init.body);
-    if (String(url).endsWith("/sendMessage") && payload.text?.includes("這次清除") && failConfirmation) {
+    if (String(url).endsWith("/sendMessage") && payload.text === t("zh", "forgetDone") && failConfirmation) {
       failConfirmation = false; return telegramResponse(false, 503);
     }
     if (String(url).endsWith("/createForumTopic")) return telegramResponse({ message_thread_id: 73 });
@@ -283,9 +284,56 @@ test("狀態摘要會顯示處理中及逾期租約", () => withDatabaseMock(asy
   };
   await processUpdate({ message: { message_id: 70, chat: { id: 1, type: "private" },
     from: { id: 1, is_bot: false }, text: "/status" } }, auditEnv(db));
-  assert.match(text, /處理中: 1/);
-  assert.match(text, /處理租約已逾期: 1/);
+  assert.match(text, /處理中：1/);
+  assert.match(text, /處理逾時（計入處理中）：1/);
 }));
+
+test("三語身分卡、管理資料、狀態及 ID 提示使用一致標點", async () => {
+  for (const language of ["zh", "ja", "en"]) {
+    await withDatabaseMock(async (db) => {
+      const calls = [];
+      globalThis.fetch = async (url, init) => {
+        const method = String(url).split("/").pop(), payload = JSON.parse(init.body);
+        calls.push({ method, payload });
+        if (method === "getWebhookInfo") return telegramResponse({ pending_update_count: 3 });
+        return telegramResponse({ message_id: 1000 + calls.length });
+      };
+      const env = { ...auditEnv(db, false), BOT_LANGUAGE: language };
+      const separator = t(language, "fieldSeparator");
+      await processUpdate({ message: userMessage(200, { text: "test" }) }, env);
+      const header = calls.find((call) => call.method === "sendMessage").payload;
+      assert.ok(header.text.includes(`User ID${separator}<code>2</code>`));
+      assert.equal(header.parse_mode, "HTML");
+      const mapping = await db.prepare("SELECT target_message_id FROM message_map WHERE source_message_id = 200").first();
+      const admin = (id, text, extra = {}) => ({ message_id: id, text,
+        chat: { id: 1, type: "private" }, from: { id: 1, is_bot: false }, ...extra });
+      await processUpdate({ message: admin(201, "/user", {
+        reply_to_message: { message_id: mapping.target_message_id }
+      }) }, env);
+      const details = calls.at(-1).payload.text;
+      assert.ok(details.includes(`User ID${separator}<code>2</code>`));
+      assert.ok(details.includes(`${t(language, "status")}${separator}${t(language, "normalStatus")}`));
+      await processUpdate({ message: admin(202, "/status") }, env);
+      const status = calls.at(-1).payload.text;
+      assert.ok(status.startsWith(t(language, "adminStatus") + "\n\n"));
+      for (const key of ["statusDone", "statusProcessing", "statusStalled", "statusFailed", "statusDiscarded"]) {
+        assert.ok(status.includes(`${t(language, key)}${separator}0`));
+      }
+      assert.ok(status.includes(`${t(language, "statusPending")}${separator}3`));
+      await processUpdate({ message: userMessage(203, { text: "/id" }) }, env);
+      assert.equal(calls.at(-1).payload.text, `${t(language, "userId")}${separator}2`);
+      await processUpdate({ message: admin(204, "/setup", {
+        chat: { id: -1001, type: "supergroup", is_forum: true }
+      }) }, env);
+      assert.equal(calls.at(-1).payload.text, `${t(language, "groupId")}${separator}<code>-1001</code>`);
+      if (language === "en") {
+        assert.doesNotMatch(header.text, /：/);
+        assert.doesNotMatch(details, /：/);
+        assert.doesNotMatch(status, /：/);
+      }
+    });
+  }
+});
 
 test("發給其他 Bot 的管理指令不執行，給自己的後綴仍可用", () => withDatabaseMock(async (db) => {
   seedAuditUser(db);
@@ -477,10 +525,10 @@ test("管理者 /status 顯示近 24 小時更新與 Webhook 待處理數", () =
     from: { id: 1, is_bot: false }, text: "/status"
   } }, env);
   const text = calls.find((call) => call.method === "sendMessage").payload.text;
-  assert.match(text, /已完成: 1/);
-  assert.match(text, /等待重試: 1/);
-  assert.match(text, /已放棄: 1/);
-  assert.match(text, /待處理: 3/);
+  assert.match(text, /已完成：1/);
+  assert.match(text, /等待重試：1/);
+  assert.match(text, /停止重試：1/);
+  assert.match(text, /待處理：3/);
   await processUpdate({ message: {
     message_id: 6, chat: { id: -1001, type: "supergroup", is_forum: true },
     from: { id: 99, is_bot: false }, message_thread_id: 77, text: "/status"
@@ -528,7 +576,7 @@ test("/forget 需確認並清除路由資料，封鎖者保留最小封鎖紀錄
   assert.equal(blocked.username, null);
   assert.equal(blocked.first_name, "");
   assert.equal(blocked.topic_id, null);
-  assert.match(sent.at(-1).text, /封鎖狀態仍保留/);
+  assert.match(sent.at(-1).text, /清除資料不會解除封鎖/);
   await processUpdate({ message: {
     message_id: 4, chat: { id: 1, type: "private" },
     from: { id: 1, is_bot: false }, text: "/unblock 3"
@@ -551,8 +599,8 @@ test("使用者歡迎訊息依部署語言，不依 Telegram 使用者語言", (
       from: { id: 2, is_bot: false, language_code: "zh" }
     }) }, { BOT_TOKEN: "test-token", ADMIN_USER_ID: "1", BOT_LANGUAGE: language, BOT_DB: db });
   }
-  assert.match(sent[0], /こんにちは/);
-  assert.match(sent[1], /Hello/);
+  assert.equal(sent[0], t("ja", "welcome"));
+  assert.equal(sent[1], t("en", "welcome"));
   await processUpdate({ message: userMessage(3, { text: "/start" }) }, {
     BOT_TOKEN: "test-token", ADMIN_USER_ID: "1", BOT_LANGUAGE: "en",
     WELCOME_MESSAGE: "Custom greeting", BOT_DB: db
@@ -839,7 +887,7 @@ test("未知管理指令只回提示，不會誤傳給使用者", () => withData
   assert.match(calls[0].payload.text, /未知指令/);
 }));
 
-test("私聊備用模式會沿用最近對話，不重複產生身分標頭", () => withDatabaseMock(async (db) => {
+test("管理者私訊模式會沿用最近對話，不重複產生身分標頭", () => withDatabaseMock(async (db) => {
   const calls = [];
   let nextMessageId = 100;
   globalThis.fetch = async (url, init) => {
