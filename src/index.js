@@ -61,7 +61,10 @@ export default {
     try {
       const claim = await claimUpdate(env.BOT_DB, update.update_id);
       if (claim.status === "duplicate") return json({ ok: true, duplicate: true });
-      if (claim.status === "exhausted") return json({ ok: true, discarded: true });
+      if (claim.status === "exhausted") {
+        await notifyStoppedUpdate(update, env);
+        return json({ ok: true, discarded: true });
+      }
       if (claim.status === "busy") return json({ ok: false, busy: true }, { status: 500 });
       leaseToken = claim.token;
       await processUpdate(update, { ...env, _updateLease: { id: update.update_id, token: leaseToken } });
@@ -74,15 +77,16 @@ export default {
       return json({ ok: true });
     } catch (error) {
       const retryable = isRetryableError(error);
-      const storedStatus = await recordUpdateFailure(
+      const failure = await recordUpdateFailure(
         env.BOT_DB,
         update.update_id,
         retryable,
         error,
         leaseToken
-      ).catch(() => null);
-      if (storedStatus === "done") return json({ ok: true, duplicate: true });
-      const willRetry = retryable && storedStatus !== "discarded";
+      ).catch(() => ({ status: null, terminal: false }));
+      if (failure.status === "done") return json({ ok: true, duplicate: true });
+      const willRetry = retryable && failure.status !== "discarded";
+      if (retryable && failure.terminal) await notifyStoppedUpdate(update, env);
       console.log(JSON.stringify({
         event: willRetry
           ? "update_retryable_failure"
@@ -187,13 +191,14 @@ async function processAdminPrivateMessage(message, env) {
   }
 
   if (!env.ADMIN_GROUP_ID) return processDirectAdminReply(message, env);
+  return sendAdminReplyHint(message, env, "topicRequired");
 }
 
 async function configureAdminMenu(env) {
   const language = env.BOT_LANGUAGE;
-  const commands = (names) => names.map((command) => ({
+  const commands = (names, prefix = "command_") => names.map((command) => ({
     command,
-    description: t(language, `command_${command}`)
+    description: t(language, `${prefix}${command}`)
   }));
   try {
     await telegram(env, "setMyCommands", {
@@ -208,6 +213,10 @@ async function configureAdminMenu(env) {
         commands: commands(["help", "status", "user", "block", "unblock", "close"])
       });
     }
+    await telegram(env, "setMyCommands", {
+      scope: { type: "all_private_chats" },
+      commands: commands(["start", "help", "id", "forget"], "userCommand_")
+    });
   } catch (error) {
     console.log(JSON.stringify({ event: "admin_menu_setup_failed", error: sanitizeError(error) }));
   }
@@ -217,12 +226,21 @@ async function sendAdminStatus(chatId, topicId, env) {
   const now = Math.floor(Date.now() / 1000);
   const counts = await env.BOT_DB.prepare(`
     SELECT status, COUNT(*) AS total,
-      SUM(CASE WHEN status = 'processing' AND updated_at <= ? THEN 1 ELSE 0 END) AS stalled
+      SUM(CASE WHEN status = 'processing' AND updated_at <= ? THEN 1 ELSE 0 END) AS stalled,
+      MAX(updated_at) AS latest_at
     FROM processed_updates
-    WHERE updated_at >= ? GROUP BY status
-  `).bind(now - UPDATE_LEASE_SECONDS, now - 86400).all();
+    WHERE status IN ('done', 'processing', 'failed', 'discarded')
+      AND updated_at >= ? AND update_id IS NOT ? GROUP BY status
+  `).bind(now - UPDATE_LEASE_SECONDS, now - 86400, env._updateLease?.id ?? null).all();
   const byStatus = Object.fromEntries((counts.results || []).map((row) => [row.status, row.total]));
   const stalled = (counts.results || []).find((row) => row.status === "processing")?.stalled || 0;
+  const lastRelay = await env.BOT_DB.prepare("SELECT MAX(created_at) AS latest_at FROM message_map").first();
+  const lastFailure = (counts.results || []).filter((row) => ["failed", "discarded"].includes(row.status))
+    .sort((left, right) => right.latest_at - left.latest_at)[0];
+  const issue = lastFailure ? await env.BOT_DB.prepare(`
+    SELECT last_error FROM processed_updates
+    WHERE status = ? AND updated_at = ? AND update_id IS NOT ? LIMIT 1
+  `).bind(lastFailure.status, lastFailure.latest_at, env._updateLease?.id ?? null).first() : null;
   let pending = t(env.BOT_LANGUAGE, "unknown");
   try {
     const webhook = await telegram(env, "getWebhookInfo", {});
@@ -245,19 +263,50 @@ async function sendAdminStatus(chatId, topicId, env) {
         ["statusFailed", byStatus.failed || 0],
         ["statusDiscarded", byStatus.discarded || 0],
         ["statusPending", pending]
-      ].map(([key, value]) => `${t(language, key)}${separator}${value}`)
+      ].map(([key, value]) => `${t(language, key)}${separator}${value}`),
+      "",
+      `${t(language, "statusLastRelay")}${separator}${lastRelay?.latest_at
+        ? formatAge(lastRelay.latest_at, now, language) : t(language, "statusNoRelay")}`,
+      `${t(language, "statusLastError")}${separator}${lastFailure
+        ? `${summarizeFailure(issue?.last_error, language)} (${formatAge(lastFailure.latest_at, now, language)})`
+        : t(language, "statusNoError")}`
     ].join("\n")
   });
 }
 
+function formatAge(timestamp, now, language) {
+  const seconds = Math.max(0, now - Number(timestamp));
+  const [unit, size] = seconds < 60 ? ["second", 1] : seconds < 3600
+    ? ["minute", 60] : seconds < 86400 ? ["hour", 3600] : ["day", 86400];
+  return new Intl.RelativeTimeFormat(language || "zh", { numeric: "auto" })
+    .format(-Math.floor(seconds / size), unit);
+}
+
+function summarizeFailure(error, language) {
+  const text = String(error || "");
+  const key = /\b429\b|too many requests/i.test(text) ? "failureRateLimit"
+    : /\b403\b|forbidden|blocked/i.test(text) ? "failurePermission"
+    : /\b400\b/.test(text) ? "failureUnsupported"
+    : /\b5\d\d\b|網路|逾時|timeout|fetch failed|回應讀取/i.test(text) ? "failureUnavailable"
+    : "failureProcessing";
+  return t(language, key);
+}
+
 async function processUserMessage(message, env) {
+  const command = parseCommand(message.text);
+  if (command === "help") {
+    await telegram(env, "sendMessage", {
+      chat_id: message.chat.id,
+      text: t(env.BOT_LANGUAGE, "userHelp")
+    });
+    return;
+  }
   const now = Math.floor(Date.now() / 1000);
   const userId = String(message.from.id);
   let user = await getUser(env.BOT_DB, userId);
 
   if (await getMessageMap(env.BOT_DB, String(message.chat.id), message.message_id)) return;
 
-  const command = parseCommand(message.text);
   if (command === "forget") {
     const confirmed = /^\/forget(?:@[A-Za-z0-9_]+)?\s+confirm\s*$/i.test(message.text.trim());
     if (confirmed) await forgetUser(env.BOT_DB, userId, message.message_id, now);
@@ -350,7 +399,7 @@ async function processUserMessage(message, env) {
   };
   let copied;
   try {
-    copied = await telegram(env, "copyMessage", copyParameters);
+    copied = await telegramToTopic(env, "copyMessage", copyParameters, user);
   } catch (error) {
     if (!isTopicMissing(error)) {
       await notifyUserCopyFailure(message.chat.id, error, env);
@@ -359,7 +408,7 @@ async function processUserMessage(message, env) {
     await clearUserTopic(env.BOT_DB, user.user_id, user.topic_id);
     user = await ensureUserTopic({ ...user, topic_id: null }, message.from, env);
     copyParameters.message_thread_id = user.topic_id;
-    copied = await telegram(env, "copyMessage", copyParameters);
+    copied = await telegramToTopic(env, "copyMessage", copyParameters, user);
   }
 
   await saveCopiedMessage(env, user, message, copied, env.ADMIN_GROUP_ID, now);
@@ -438,6 +487,7 @@ export async function processDirectAdminReply(message, env) {
         text: t(env.BOT_LANGUAGE, "adminHelpDirect")
       });
     } else if (command) await sendUnknownCommand(message.chat.id, undefined, env);
+    else await sendAdminReplyHint(message, env, "replyRequired");
     return;
   }
 
@@ -447,12 +497,11 @@ export async function processDirectAdminReply(message, env) {
     WHERE target_chat_id = ? AND target_message_id = ?
   `).bind(String(env.ADMIN_USER_ID), repliedMessageId).first();
   if (!mapping) {
-    if (parseCommand(message.text)) await sendUnknownCommand(message.chat.id, undefined, env);
-    return;
+    return sendAdminReplyHint(message, env, "replyUnavailable");
   }
 
   const user = await getUser(env.BOT_DB, mapping.user_id);
-  if (!user || user.erased) return;
+  if (!user || user.erased) return sendAdminReplyHint(message, env, "replyUnavailable");
 
   const command = parseCommand(message.text);
   if (command) {
@@ -520,11 +569,13 @@ async function processAdminTopicMessage(message, env) {
     return;
   }
 
-  if (!message.message_thread_id || message.is_topic_message === false) return;
+  if (!message.message_thread_id || message.is_topic_message === false) {
+    return sendAdminReplyHint(message, env, "topicRequired");
+  }
   if (await getMessageMap(env.BOT_DB, String(message.chat.id), message.message_id)) return;
 
   const user = await getUserByTopic(env.BOT_DB, message.message_thread_id);
-  if (!user) return;
+  if (!user) return sendAdminReplyHint(message, env, "replyUnavailable");
 
   if (command) {
     const handled = await handleAdminCommand(command, message, user, env);
@@ -650,7 +701,7 @@ async function ensureUserTopic(user, from, env) {
   if (user.topic_id && user.topic_card_message_id != null) return user;
   if (user.topic_id) {
     try {
-      const card = await sendTopicUserCard(user.topic_id, from, env);
+      const card = await sendTopicUserCard(user.topic_id, from, env, user);
       await saveTopicCardMessage(env.BOT_DB, user, user.topic_id, card.message_id);
       return { ...user, topic_card_message_id: card.message_id };
     } catch (error) {
@@ -680,7 +731,7 @@ async function ensureUserTopic(user, from, env) {
           AND topic_lease_token = ?
       `).bind(topic.message_thread_id, now, user.user_id, user.generation, token).run();
       if (Number(assigned.meta?.changes || 0) !== 1) throw new ObsoleteWorkError();
-      const card = await sendTopicUserCard(topic.message_thread_id, from, env);
+      const card = await sendTopicUserCard(topic.message_thread_id, from, env, user);
       await saveTopicCardMessage(env.BOT_DB, user, topic.message_thread_id, card.message_id);
       return {
         ...user,
@@ -711,13 +762,13 @@ async function clearUserTopic(db, userId, topicId) {
   `).bind(userId, topicId).run();
 }
 
-async function sendTopicUserCard(topicId, from, env) {
-  return telegram(env, "sendMessage", {
+async function sendTopicUserCard(topicId, from, env, user) {
+  return telegramToTopic(env, "sendMessage", {
     chat_id: env.ADMIN_GROUP_ID,
     message_thread_id: topicId,
     text: buildUserCard(from, env.BOT_LANGUAGE),
     parse_mode: "HTML"
-  });
+  }, user);
 }
 
 async function saveTopicCardMessage(db, user, topicId, messageId) {
@@ -919,14 +970,14 @@ async function deliverMediaGroup(group, env) {
   };
   let copied;
   try {
-    copied = await telegram(env, "copyMessages", copyParameters);
+    copied = await telegramToTopic(env, "copyMessages", copyParameters, user);
   } catch (error) {
     if (group.direction !== "user_to_admin" || !topicId || !isTopicMissing(error)) throw error;
     await clearUserTopic(env.BOT_DB, user.user_id, topicId);
     const topicUser = await ensureUserTopic({ ...user, topic_id: null }, user, env);
     copyParameters.chat_id = env.ADMIN_GROUP_ID;
     copyParameters.message_thread_id = topicUser.topic_id;
-    copied = await telegram(env, "copyMessages", copyParameters);
+    copied = await telegramToTopic(env, "copyMessages", copyParameters, user);
   }
 
   if (!Array.isArray(copied) || copied.length !== messageIds.length) {
@@ -1000,6 +1051,33 @@ async function sendUnknownCommand(chatId, topicId, env) {
     chat_id: chatId,
     message_thread_id: topicId,
     text: t(env.BOT_LANGUAGE, "unknownCommand")
+  });
+}
+
+async function sendAdminReplyHint(message, env, key) {
+  const text = t(env.BOT_LANGUAGE, key);
+  try {
+    await telegram(env, "sendMessage", {
+      chat_id: message.chat.id,
+      message_thread_id: message.message_thread_id,
+      reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
+      text
+    });
+  } catch (error) {
+    if (isRetryableError(error) || String(message.chat.id) !== String(env.ADMIN_GROUP_ID)
+      || String(message.from?.id) !== String(env.ADMIN_USER_ID)) throw error;
+    await telegram(env, "sendMessage", { chat_id: env.ADMIN_USER_ID, text });
+  }
+}
+
+async function notifyStoppedUpdate(update, env) {
+  const message = update.message || update.edited_message;
+  if (!message?.chat || !message.from || message.from.is_bot) return;
+  const adminTopic = String(message.chat.id) === String(env.ADMIN_GROUP_ID)
+    && String(message.from.id) === String(env.ADMIN_USER_ID) && message.chat.is_forum;
+  if (message.chat.type !== "private" && !adminTopic) return;
+  await sendAdminReplyHint(message, env, "retryStopped").catch((error) => {
+    console.log(JSON.stringify({ event: "retry_notice_failed", error: sanitizeError(error) }));
   });
 }
 
@@ -1109,6 +1187,24 @@ async function telegram(env, method, payload) {
   return data.result;
 }
 
+async function telegramToTopic(env, method, payload, user) {
+  try {
+    return await telegram(env, method, payload);
+  } catch (error) {
+    if (!payload.message_thread_id || !String(error.message).toLowerCase().includes("topic_closed")) throw error;
+    await requireCurrentUser(env.BOT_DB, user, true);
+    try {
+      await telegram(env, "reopenForumTopic", {
+        chat_id: payload.chat_id,
+        message_thread_id: payload.message_thread_id
+      });
+    } catch (reopenError) {
+      if (!/topic_not_modified|topic is not modified/i.test(String(reopenError.message))) throw reopenError;
+    }
+    return telegram(env, method, payload);
+  }
+}
+
 async function claimUpdate(db, updateId) {
   const now = Math.floor(Date.now() / 1000);
   const token = crypto.randomUUID();
@@ -1161,7 +1257,7 @@ async function finishUpdate(db, updateId, token) {
 }
 
 async function recordUpdateFailure(db, updateId, retryable, error, token) {
-  await db.prepare(`
+  const result = await db.prepare(`
     UPDATE processed_updates SET
       status = CASE
         WHEN ? = 1 AND attempts >= ? THEN 'discarded'
@@ -1169,7 +1265,7 @@ async function recordUpdateFailure(db, updateId, retryable, error, token) {
       END,
       updated_at = ?,
       last_error = ?
-    WHERE update_id = ? AND lease_token = ?
+    WHERE update_id = ? AND lease_token = ? AND status = 'processing'
   `).bind(
     retryable ? 1 : 0,
     MAX_UPDATE_ATTEMPTS,
@@ -1182,7 +1278,8 @@ async function recordUpdateFailure(db, updateId, retryable, error, token) {
   const stored = await db.prepare(
     "SELECT status FROM processed_updates WHERE update_id = ?"
   ).bind(updateId).first();
-  return stored?.status || null;
+  return { status: stored?.status || null,
+    terminal: Number(result.meta?.changes || 0) === 1 && stored?.status === "discarded" };
 }
 
 async function getUser(db, userId) {
@@ -1477,11 +1574,12 @@ async function secureEqual(left, right) {
 
 function isTopicMissing(error) {
   const message = String(error?.message || "").toLowerCase();
-  return message.includes("message thread not found") || message.includes("topic_closed");
+  return message.includes("message thread not found");
 }
 
 function sanitizeError(error) {
-  return String(error?.message || error || "unknown error")
+  const code = error instanceof TelegramApiError ? `${error.errorCode} ` : "";
+  return (code + String(error?.message || error || "unknown error"))
     .replace(/bot\d+:[A-Za-z0-9_-]+/g, "bot[REDACTED]")
     .slice(0, 500);
 }

@@ -3,7 +3,21 @@ const messages = {
     adminReadyTopic: "話題模式。\n請在對應使用者的話題內回覆；傳送 /help 查看指令。",
     adminReadyDirect: "管理者私訊模式。\n請回覆 Bot 轉來的使用者訊息；傳送 /help 查看指令。",
     blockedNotice: "目前無法接收你的訊息。",
-    welcome: "請在此傳送訊息。管理者可透過 Bot 回覆。",
+    welcome: "請在此傳送訊息。管理者可透過 Bot 回覆。\n傳送 /help 查看使用說明。",
+    userHelp: `直接傳送文字或一般媒體，管理者可透過 Bot 回覆。
+
+/start — 查看歡迎訊息
+/help — 查看使用說明
+/id — 查看自己的 User ID
+/forget — 查看資料清除說明；不會立即清除資料`,
+    userCommand_start: "查看歡迎訊息",
+    userCommand_help: "查看使用說明",
+    userCommand_id: "查看自己的 User ID",
+    userCommand_forget: "查看資料清除說明",
+    replyRequired: "這則訊息未送出。請使用「回覆」選擇 Bot 轉來的使用者訊息。",
+    topicRequired: "這則訊息未送出。請在對應使用者的話題內回覆。",
+    replyUnavailable: "這則訊息未送出：轉送對照已失效或不存在。請使用對方的新訊息或最新話題回覆。",
+    retryStopped: "這則訊息未能確認處理完成，已停止自動重試。\n請先確認對方是否收到，再決定是否重送。",
     userId: "你的 Telegram User ID",
     rateLimit: "訊息傳送過快，請稍後再試。",
     blocked: "已封鎖此使用者。",
@@ -15,7 +29,7 @@ const messages = {
 /user — 查看使用者資料
 /block — 封鎖使用者
 /unblock — 解除封鎖
-/close — 關閉話題，不封鎖使用者
+/close — 關閉話題，不封鎖使用者；新訊息會重開
 /status — 查看近 24 小時處理狀態
 
 私訊 Bot：
@@ -41,6 +55,15 @@ const messages = {
     statusFailed: "等待重試",
     statusDiscarded: "停止重試",
     statusPending: "Webhook 待處理",
+    statusLastRelay: "最近成功轉送",
+    statusNoRelay: "暫無保留的轉送紀錄",
+    statusLastError: "近 24 小時最近異常",
+    statusNoError: "無",
+    failureRateLimit: "Telegram 暫時限流",
+    failureUnavailable: "Telegram 連線或服務暫時異常",
+    failurePermission: "對方拒收或 Bot 權限不足",
+    failureUnsupported: "訊息或操作未被 Telegram 接受",
+    failureProcessing: "資料處理失敗",
     unknown: "暫時無法取得",
     notBlocked: "找不到已封鎖的使用者。",
     forgetConfirm: `若要清除 Bot 保存的你的個人資料、相簿暫存及轉送對照，請傳送 /forget confirm。
@@ -56,7 +79,7 @@ const messages = {
 • 清除資料不會解除封鎖。
 • 為防止舊請求重建資料，會保留含 User ID 的必要紀錄；非封鎖者的紀錄在 7 天後依排程清理。
 • 之後的新訊息可能重新建立資料。`,
-    command_start: "設定管理選單",
+    command_start: "更新指令選單",
     command_help: "查看管理指令",
     command_status: "查看近 24 小時狀態",
     command_user: "查看使用者資料",
@@ -85,7 +108,21 @@ const messages = {
     adminReadyTopic: "トピックモードです。\nユーザーのトピックで返信してください。/help でコマンドを確認できます。",
     adminReadyDirect: "管理者個別チャットモードです。\n転送されたメッセージに返信してください。/help でコマンドを確認できます。",
     blockedNotice: "現在、メッセージを受け付けられません。",
-    welcome: "ここにメッセージを送ってください。管理者はこのチャットに返信できます。",
+    welcome: "ここにメッセージを送ってください。管理者はこのチャットに返信できます。\n/help で使い方を確認できます。",
+    userHelp: `テキストや一般的なメディアを送信すると、管理者が Bot を通して返信できます。
+
+/start — 開始時のメッセージを表示
+/help — 使い方を表示
+/id — 自分の User ID を表示
+/forget — データ消去の説明を表示（直ちには消去しません）`,
+    userCommand_start: "開始時のメッセージを表示",
+    userCommand_help: "使い方を表示",
+    userCommand_id: "自分の User ID を表示",
+    userCommand_forget: "データ消去の説明を表示",
+    replyRequired: "このメッセージは送信されていません。Bot が転送したユーザーのメッセージを選んで返信してください。",
+    topicRequired: "このメッセージは送信されていません。該当ユーザーのトピックで返信してください。",
+    replyUnavailable: "このメッセージは送信されていません。転送の対応情報が失効したか、存在しません。ユーザーの新しいメッセージか最新のトピックから返信してください。",
+    retryStopped: "このメッセージの処理完了を確認できず、自動再試行を停止しました。\n再送する前に、相手に届いているか確認してください。",
     userId: "あなたの Telegram User ID",
     rateLimit: "メッセージの送信が速すぎます。しばらくしてからお試しください。",
     blocked: "このユーザーをブロックしました。",
@@ -97,7 +134,7 @@ const messages = {
 /user — ユーザー情報を表示
 /block — ユーザーをブロック
 /unblock — ブロックを解除
-/close — トピックを閉じる（ブロックはしません）
+/close — トピックを閉じる（新着時に再開し、ブロックはしません）
 /status — 過去24時間の処理状況を表示
 
 Bot との個別チャット：
@@ -123,6 +160,15 @@ Bot との個別チャット：
     statusFailed: "再試行待ち",
     statusDiscarded: "再試行なし",
     statusPending: "Webhook の保留件数",
+    statusLastRelay: "最後に転送に成功した時刻",
+    statusNoRelay: "保存中の転送記録はありません",
+    statusLastError: "過去24時間の直近のエラー",
+    statusNoError: "なし",
+    failureRateLimit: "Telegram の一時的な送信制限",
+    failureUnavailable: "Telegram の接続またはサービスの一時的な問題",
+    failurePermission: "相手の受信拒否または Bot の権限不足",
+    failureUnsupported: "Telegram がメッセージまたは操作を受け付けませんでした",
+    failureProcessing: "データ処理の失敗",
     unknown: "取得できません",
     notBlocked: "ブロック中のユーザーが見つかりません。",
     forgetConfirm: `Bot が保存しているあなたの個人情報、アルバムの一時データ、メッセージの対応情報を消去するには、/forget confirm と送信してください。
@@ -138,7 +184,7 @@ Bot との個別チャット：
 • 消去してもブロックは解除されません。
 • 古いリクエストによる再作成を防ぐため、User ID を含む必要な記録を保持します。ブロックされていないユーザーの記録は7日後の定期処理で削除します。
 • その後の新しいメッセージで情報が再作成される場合があります。`,
-    command_start: "管理メニューを設定",
+    command_start: "コマンドメニューを更新",
     command_help: "管理コマンドを表示",
     command_status: "過去24時間の状況を表示",
     command_user: "ユーザー情報を表示",
@@ -167,7 +213,21 @@ Bot との個別チャット：
     adminReadyTopic: "Topic mode.\nReply in the user's topic. Send /help for commands.",
     adminReadyDirect: "Admin private-chat mode.\nReply to a message relayed by the bot. Send /help for commands.",
     blockedNotice: "This bot is not accepting your messages right now.",
-    welcome: "Send a message here. The admin can reply in this chat.",
+    welcome: "Send a message here. The admin can reply in this chat.\nSend /help for instructions.",
+    userHelp: `Send text or standard media here. The admin can reply through the bot.
+
+/start — Show the welcome message
+/help — Show instructions
+/id — Show your User ID
+/forget — Show erasure instructions; does not erase data immediately`,
+    userCommand_start: "Show the welcome message",
+    userCommand_help: "Show instructions",
+    userCommand_id: "Show your User ID",
+    userCommand_forget: "Show erasure instructions",
+    replyRequired: "This message was not sent. Use Reply on a user message relayed by the bot.",
+    topicRequired: "This message was not sent. Reply in the matching user's topic.",
+    replyUnavailable: "This message was not sent: the relay mapping has expired or does not exist. Reply to a new message from the user or use their latest topic.",
+    retryStopped: "Processing could not be confirmed for this message. Automatic retries have stopped.\nCheck whether the recipient received it before deciding to resend.",
     userId: "Your Telegram User ID",
     rateLimit: "You're sending messages too quickly. Please try again shortly.",
     blocked: "User blocked.",
@@ -179,7 +239,7 @@ In a user's topic:
 /user — Show user details
 /block — Block this user
 /unblock — Unblock this user
-/close — Close the topic, without blocking the user
+/close — Close the topic; new messages reopen it, without blocking the user
 /status — Show processing status for the past 24 hours
 
 In your private chat with the bot:
@@ -205,6 +265,15 @@ Regular replies go to that user.`,
     statusFailed: "Awaiting retry",
     statusDiscarded: "Not retrying",
     statusPending: "Telegram webhook pending",
+    statusLastRelay: "Last successful relay",
+    statusNoRelay: "No retained relay records",
+    statusLastError: "Latest issue in the past 24 hours",
+    statusNoError: "None",
+    failureRateLimit: "Temporary Telegram rate limit",
+    failureUnavailable: "Temporary Telegram connection or service issue",
+    failurePermission: "Recipient rejected delivery or the bot lacks permission",
+    failureUnsupported: "Telegram rejected the message or operation",
+    failureProcessing: "Data processing failed",
     unknown: "Unavailable",
     notBlocked: "No blocked user was found.",
     forgetConfirm: `To erase the personal data, staged albums, and relay mappings this bot stores about you, send /forget confirm.
@@ -220,7 +289,7 @@ Erasure scope:
 • Any block remains in effect.
 • Necessary records including your User ID prevent old requests from restoring data. For unblocked users, scheduled cleanup removes these records after 7 days.
 • Later new messages may create data again.`,
-    command_start: "Set admin command menu",
+    command_start: "Refresh command menus",
     command_help: "Show admin commands",
     command_status: "Show past 24-hour status",
     command_user: "Show user details",

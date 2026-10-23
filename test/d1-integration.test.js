@@ -73,10 +73,15 @@ function userMessage(messageId, extra = {}) {
   };
 }
 
-function telegramResponse(result, status = 200) {
+function adminMessage(messageId, text, extra = {}) {
+  return { message_id: messageId, text, chat: { id: 1, type: "private" },
+    from: { id: 1, is_bot: false }, ...extra };
+}
+
+function telegramResponse(result, status = 200, description = "mock failure") {
   return new Response(JSON.stringify(status === 200
     ? { ok: true, result }
-    : { ok: false, error_code: status, description: "mock failure" }), {
+    : { ok: false, error_code: status, description }), {
     status,
     headers: { "content-type": "application/json" }
   });
@@ -481,7 +486,7 @@ test("ready 拒絕缺少新 migration 的 D1，套用後恢復", async () => {
   } finally { db.close(); }
 });
 
-test("管理者 /start 設定只對本人可見的模式專屬指令選單", () => withDatabaseMock(async (db) => {
+test("管理者 /start 更新使用者選單，管理指令仍只對本人可見", () => withDatabaseMock(async (db) => {
   const calls = [];
   globalThis.fetch = async (url, init) => {
     calls.push({ method: String(url).split("/").pop(), payload: JSON.parse(init.body) });
@@ -492,12 +497,14 @@ test("管理者 /start 設定只對本人可見的模式專屬指令選單", () 
     from: { id: 1, is_bot: false }, text: "/start"
   } }, { BOT_TOKEN: "test-token", ADMIN_USER_ID: "1", ADMIN_GROUP_ID: "-1001", BOT_DB: db });
   const menus = calls.filter((call) => call.method === "setMyCommands");
-  assert.equal(menus.length, 2);
+  assert.equal(menus.length, 3);
   assert.deepEqual(menus[0].payload.scope, { type: "chat", chat_id: "1" });
   assert.deepEqual(menus[0].payload.commands.map((item) => item.command), ["start", "help", "status", "unblock"]);
   assert.deepEqual(menus[1].payload.scope, { type: "chat_member", chat_id: "-1001", user_id: 1 });
   assert.deepEqual(menus[1].payload.commands.map((item) => item.command),
     ["help", "status", "user", "block", "unblock", "close"]);
+  assert.deepEqual(menus[2].payload.scope, { type: "all_private_chats" });
+  assert.deepEqual(menus[2].payload.commands.map((item) => item.command), ["start", "help", "id", "forget"]);
   calls.length = 0;
   await processUpdate({ message: {
     message_id: 2, chat: { id: 1, type: "private" },
@@ -1027,7 +1034,9 @@ test("可重試錯誤超過上限後會轉為 discarded", () => withDatabaseMock
   const exhausted = await worker.fetch(request(), env);
   assert.equal(exhausted.status, 200);
   assert.deepEqual(await exhausted.json(), { ok: true, discarded: true });
-  assert.equal(calls, 5);
+  assert.equal(calls, 6); // Five processing attempts, then one best-effort stop notice.
+  assert.equal((await worker.fetch(request(), env)).status, 200);
+  assert.equal(calls, 6);
   assert.equal((await db.prepare(
     "SELECT status FROM processed_updates WHERE update_id = 6001"
   ).first()).status, "discarded");
@@ -1093,4 +1102,293 @@ test("Topic 資料卡暫時失敗後會沿用原 Topic 補送", () => withDataba
   ).first();
   assert.equal(user.topic_id, 92);
   assert.ok(user.topic_card_message_id > 0);
+}));
+
+test("三語使用者 /help 不轉送、不讀寫個人資料，也不反覆註冊選單", async () => {
+  for (const language of ["zh", "ja", "en"]) {
+    await withDatabaseMock(async (db) => {
+      const calls = [];
+      globalThis.fetch = async (url, init) => {
+        calls.push({ method: String(url).split("/").pop(), payload: JSON.parse(init.body) });
+        return telegramResponse(true);
+      };
+      const prepare = db.prepare.bind(db);
+      db.prepare = () => { throw new Error("/help must not access personal data"); };
+      await processUpdate({ message: userMessage(2000, { text: "/help" }) },
+        { ...auditEnv(db), BOT_LANGUAGE: language });
+      db.prepare = prepare;
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].method, "sendMessage");
+      assert.equal(calls[0].payload.text, t(language, "userHelp"));
+      assert.doesNotMatch(calls[0].payload.text, /\/(block|unblock|status)\b/);
+      assert.equal((await db.prepare("SELECT COUNT(*) AS total FROM users").first()).total, 0);
+      await processUpdate({ message: userMessage(2001, { text: "/start" }) }, auditEnv(db));
+      assert.equal(calls.filter((call) => call.method === "setMyCommands").length, 0);
+    });
+  }
+});
+
+test("使用者選單按部署語言註冊，只有管理者 /start 會更新", async () => {
+  for (const language of ["zh", "ja", "en"]) {
+    await withDatabaseMock(async (db) => {
+      const calls = [];
+      globalThis.fetch = async (url, init) => {
+        calls.push({ method: String(url).split("/").pop(), payload: JSON.parse(init.body) });
+        return telegramResponse(true);
+      };
+      await processUpdate({ message: adminMessage(2010, "/start") },
+        { ...auditEnv(db), BOT_LANGUAGE: language });
+      const menus = calls.filter((call) => call.method === "setMyCommands");
+      const userMenu = menus.find((call) => call.payload.scope.type === "all_private_chats");
+      assert.deepEqual(userMenu.payload.commands, ["start", "help", "id", "forget"].map((command) => ({
+        command, description: t(language, `userCommand_${command}`)
+      })));
+      assert.equal(menus.filter((call) => call.payload.commands.some((item) => item.command === "block"))
+        .every((call) => call.payload.scope.user_id === 1 || call.payload.scope.chat_id === "1"), true);
+    });
+  }
+});
+
+test("管理者未指定回覆或回覆過期對照時，明確提示未送出且不猜測使用者", () => withDatabaseMock(async (db) => {
+  seedAuditUser(db);
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ method: String(url).split("/").pop(), payload: JSON.parse(init.body) });
+    return telegramResponse(true);
+  };
+  const cases = [
+    [false, adminMessage(2020, "未選擇回覆"), "replyRequired"],
+    [false, adminMessage(2021, "過期對照", { reply_to_message: { message_id: 999 } }), "replyUnavailable"],
+    [false, adminMessage(2022, "/block", { reply_to_message: { message_id: 999 } }), "replyUnavailable"],
+    [true, adminMessage(2023, "錯誤位置"), "topicRequired"],
+    [true, adminMessage(2024, "群組一般訊息", {
+      chat: { id: -1001, type: "supergroup", is_forum: true }
+    }), "topicRequired"]
+  ];
+  for (const [topic, message, key] of cases) {
+    calls.length = 0;
+    await processUpdate({ message }, auditEnv(db, topic));
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].method, "sendMessage");
+    assert.equal(calls[0].payload.chat_id, message.chat.id);
+    assert.equal(calls[0].payload.text, t("zh", key));
+    assert.equal(calls[0].payload.reply_parameters.message_id, message.message_id);
+  }
+  assert.equal((await db.prepare("SELECT COUNT(*) AS total FROM message_map").first()).total, 0);
+}));
+
+test("清除後的舊話題回覆會提示失效，不重建個人資料或路由", () => withDatabaseMock(async (db) => {
+  seedAuditUser(db);
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ method: String(url).split("/").pop(), payload: JSON.parse(init.body) });
+    return telegramResponse(true);
+  };
+  await processUpdate({ message: userMessage(2030, { text: "/forget confirm" }) }, auditEnv(db));
+  calls.length = 0;
+  await processUpdate({ message: adminMessage(2031, "舊話題回覆", {
+    chat: { id: -1001, type: "supergroup", is_forum: true }, message_thread_id: 72
+  }) }, auditEnv(db));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].payload.text, t("zh", "replyUnavailable"));
+  assert.equal(calls[0].payload.message_thread_id, 72);
+  const user = await db.prepare("SELECT erased,topic_id,first_name FROM users WHERE user_id='2'").first();
+  assert.deepEqual({ ...user }, { erased: 1, topic_id: null, first_name: "" });
+}));
+
+test("轉送重試耗盡只提示原發送者一次，不把不確定送達說成未送達", async () => {
+  for (const topicReply of [false, true]) {
+    await withDatabaseMock(async (db) => {
+      seedAuditUser(db);
+      const calls = [];
+      globalThis.fetch = async (url, init) => {
+        const method = String(url).split("/").pop(), payload = JSON.parse(init.body);
+        calls.push({ method, payload });
+        return method === "copyMessage" ? telegramResponse(false, 503) : telegramResponse(true);
+      };
+      const message = topicReply ? adminMessage(2040, "回覆", {
+        chat: { id: -1001, type: "supergroup", is_forum: true }, message_thread_id: 72
+      }) : userMessage(2040, { text: "傳送" });
+      const env = auditEnv(db);
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const response = await worker.fetch(auditRequest(8001, message), env);
+        assert.equal(response.status, attempt < 4 ? 500 : 200);
+      }
+      await worker.fetch(auditRequest(8001, message), env);
+      assert.equal(calls.filter((call) => call.method === "copyMessage").length, 5);
+      const notices = calls.filter((call) => call.method === "sendMessage");
+      assert.equal(notices.length, 1);
+      assert.equal(notices[0].payload.chat_id, message.chat.id);
+      assert.equal(notices[0].payload.message_thread_id, message.message_thread_id);
+      assert.equal(notices[0].payload.text, t("zh", "retryStopped"));
+      assert.match(notices[0].payload.text, /先確認/);
+      assert.doesNotMatch(notices[0].payload.text, /未送達/);
+      assert.match((await db.prepare("SELECT last_error FROM processed_updates WHERE update_id=8001").first()).last_error, /^503 /);
+    });
+  }
+});
+
+test("失效的最後一次更新租約只發一次停止提示，忽略非管理者群組來源", () => withDatabaseMock(async (db) => {
+  const now = Math.floor(Date.now() / 1000);
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ method: String(url).split("/").pop(), payload: JSON.parse(init.body) });
+    return telegramResponse(true);
+  };
+  for (const [id, message] of [[8002, userMessage(2050, { text: "舊工作" })], [8003, {
+    ...userMessage(2051, { text: "群組訊息" }), chat: { id: -1001, type: "supergroup", is_forum: true }
+  }]]) {
+    await db.prepare(`INSERT INTO processed_updates(update_id,processed_at,status,attempts,updated_at,lease_token)
+      VALUES (?,?,'processing',5,?,'expired')`).bind(id, now - 120, now - 120).run();
+    assert.equal((await worker.fetch(auditRequest(id, message), auditEnv(db))).status, 200);
+    assert.equal((await worker.fetch(auditRequest(id, message), auditEnv(db))).status, 200);
+  }
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].payload.chat_id, 2);
+}));
+
+test("失去租約的舊工作不能重複發送新工作已處理的終止提示", () => withDatabaseMock(async (db) => {
+  seedAuditUser(db);
+  const now = Math.floor(Date.now() / 1000);
+  await db.prepare(`INSERT INTO processed_updates(update_id,processed_at,status,attempts,updated_at,lease_token)
+    VALUES (8004,?,'failed',4,?,'old')`).bind(now, now).run();
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    const method = String(url).split("/").pop(); calls.push(method);
+    await db.prepare("UPDATE processed_updates SET status='discarded',lease_token='new-worker' WHERE update_id=8004").run();
+    return telegramResponse(false, 503);
+  };
+  assert.equal((await worker.fetch(auditRequest(8004, userMessage(2060, { text: "test" })), auditEnv(db))).status, 200);
+  assert.deepEqual(calls, ["copyMessage"]);
+}));
+
+test("文字與相簿遇到關閉話題時沿用原話題，只有被刪除才另建", async () => {
+  for (const album of [false, true]) {
+    for (const deleted of [false, true]) {
+      await withDatabaseMock(async (db) => {
+        seedAuditUser(db);
+        const calls = [];
+        let copies = 0;
+        globalThis.fetch = async (url, init) => {
+          const method = String(url).split("/").pop(), payload = JSON.parse(init.body);
+          calls.push({ method, payload });
+          if (method === "createForumTopic") return telegramResponse({ message_thread_id: 73 });
+          if (method === "copyMessage" || method === "copyMessages") {
+            if (++copies === 1) return telegramResponse(false, 400, deleted ? "message thread not found" : "TOPIC_CLOSED");
+            return telegramResponse(album ? [{ message_id: 900 }] : { message_id: 900 });
+          }
+          return telegramResponse({ message_id: 901 });
+        };
+        const message = userMessage(2070, album
+          ? { text: undefined, media_group_id: "recover-topic", photo: [{}] } : { text: "test" });
+        await processUpdate({ message }, auditEnv(db));
+        assert.equal(copies, 2);
+        assert.equal(calls.filter((call) => call.method === "reopenForumTopic").length, deleted ? 0 : 1);
+        assert.equal(calls.filter((call) => call.method === "createForumTopic").length, deleted ? 1 : 0);
+        assert.equal((await db.prepare("SELECT topic_id FROM users WHERE user_id='2'").first()).topic_id, deleted ? 73 : 72);
+        assert.equal((await db.prepare("SELECT COUNT(*) AS total FROM message_map").first()).total, 1);
+      });
+    }
+  }
+});
+
+test("補送身分卡遇到關閉話題且被其他工作重開時，仍沿用原話題", () => withDatabaseMock(async (db) => {
+  seedAuditUser(db);
+  await db.prepare("UPDATE users SET topic_card_message_id=NULL WHERE user_id='2'").run();
+  const calls = [];
+  let cards = 0;
+  globalThis.fetch = async (url) => {
+    const method = String(url).split("/").pop(); calls.push(method);
+    if (method === "sendMessage" && ++cards === 1) return telegramResponse(false, 400, "TOPIC_CLOSED");
+    if (method === "reopenForumTopic") return telegramResponse(false, 400, "TOPIC_NOT_MODIFIED");
+    return telegramResponse({ message_id: 902 });
+  };
+  await processUpdate({ message: userMessage(2080, { text: "test" }) }, auditEnv(db));
+  assert.equal(cards, 2);
+  assert.equal(calls.filter((method) => method === "createForumTopic").length, 0);
+  assert.equal((await db.prepare("SELECT topic_id FROM users WHERE user_id='2'").first()).topic_id, 72);
+}));
+
+test("話題重開前重新檢查清除與封鎖狀態，不為舊工作恢復路由", () => withDatabaseMock(async (db) => {
+  seedAuditUser(db);
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    const method = String(url).split("/").pop(); calls.push(method);
+    await db.prepare("UPDATE users SET blocked=1 WHERE user_id='2'").run();
+    return telegramResponse(false, 400, "TOPIC_CLOSED");
+  };
+  await processUpdate({ message: userMessage(2090, { text: "test" }) }, auditEnv(db));
+  assert.deepEqual(calls, ["copyMessage"]);
+  assert.equal((await db.prepare("SELECT COUNT(*) AS total FROM message_map").first()).total, 0);
+}));
+
+test("/status 排除自身，從既有索引取得最近轉送及簡短失敗原因", async () => {
+  for (const language of ["zh", "ja", "en"]) {
+    await withDatabaseMock(async (db) => {
+      seedAuditUser(db);
+      const now = Math.floor(Date.now() / 1000), calls = [];
+      await db.prepare("INSERT INTO message_map VALUES ('2',3000,'-1001',900,'2',?)").bind(now - 300).run();
+      await db.prepare(`INSERT INTO processed_updates(update_id,processed_at,status,attempts,updated_at,last_error)
+        VALUES (8100,?,'failed',1,?,'503 Telegram copyMessage error'),
+          (8101,?,'discarded',5,?,'403 private detail bot123456:DO_NOT_DISPLAY'),
+          (8102,?,'discarded',5,?,'old failure')`)
+        .bind(now - 120, now - 120, now - 60, now - 60, now - 172800, now - 172800).run();
+      globalThis.fetch = async (url, init) => {
+        const method = String(url).split("/").pop(), payload = JSON.parse(init.body);
+        calls.push({ method, payload });
+        return telegramResponse(method === "getWebhookInfo" ? { pending_update_count: 0 } : true);
+      };
+      const sql = [], prepare = db.prepare.bind(db);
+      db.prepare = (query) => { sql.push(query); return prepare(query); };
+      const response = await worker.fetch(auditRequest(8103, adminMessage(2100, "/status")),
+        { ...auditEnv(db), BOT_LANGUAGE: language });
+      assert.equal(response.status, 200);
+      const text = calls.at(-1).payload.text, separator = t(language, "fieldSeparator");
+      assert.ok(text.includes(`${t(language, "statusProcessing")}${separator}0`));
+      assert.ok(text.includes(`${t(language, "statusFailed")}${separator}1`));
+      assert.ok(text.includes(`${t(language, "statusDiscarded")}${separator}1`));
+      assert.ok(text.includes(t(language, "statusLastRelay")));
+      assert.ok(text.includes(t(language, "failurePermission")));
+      assert.doesNotMatch(text, /DO_NOT_DISPLAY|private detail|old failure/);
+      const statusSql = sql.find((query) => /GROUP BY status/.test(query));
+      const plan = await prepare("EXPLAIN QUERY PLAN " + statusSql)
+        .bind(now - 60, now - 86400, 8103).all();
+      assert.ok(plan.results.some((row) => /idx_processed_updates_status/.test(row.detail)));
+      const relayPlan = await prepare("EXPLAIN QUERY PLAN SELECT MAX(created_at) AS latest_at FROM message_map").all();
+      assert.ok(relayPlan.results.some((row) => /idx_message_map_created/.test(row.detail)));
+    });
+  }
+});
+
+test("無異常時 /status 只做兩次唯讀查詢，無轉送記錄時不誤報時間", () => withDatabaseMock(async (db) => {
+  const sql = [], prepare = db.prepare.bind(db);
+  db.prepare = (query) => { sql.push(query); return prepare(query); };
+  let text;
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith("/getWebhookInfo")) return telegramResponse({ pending_update_count: 0 });
+    text = JSON.parse(init.body).text; return telegramResponse(true);
+  };
+  await processUpdate({ message: adminMessage(2110, "/status") }, auditEnv(db));
+  assert.equal(sql.length, 2);
+  assert.ok(sql.every((query) => /^\s*SELECT/.test(query)));
+  assert.ok(text.includes(t("zh", "statusNoRelay")));
+  assert.ok(text.includes(`${t("zh", "statusLastError")}：${t("zh", "statusNoError")}`));
+}));
+
+test("舊話題已關閉時，未送出提示改私訊管理者，不重新開啟失效話題", () => withDatabaseMock(async (db) => {
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    const method = String(url).split("/").pop(), payload = JSON.parse(init.body);
+    calls.push({ method, payload });
+    return String(payload.chat_id) === "-1001"
+      ? telegramResponse(false, 400, "TOPIC_CLOSED") : telegramResponse(true);
+  };
+  await processUpdate({ message: adminMessage(2120, "舊話題回覆", {
+    chat: { id: -1001, type: "supergroup", is_forum: true }, message_thread_id: 999
+  }) }, auditEnv(db));
+  assert.deepEqual(calls.map((call) => call.method), ["sendMessage", "sendMessage"]);
+  assert.equal(calls[1].payload.chat_id, "1");
+  assert.equal(calls[1].payload.text, t("zh", "replyUnavailable"));
+  assert.equal(calls[1].payload.reply_parameters, undefined);
+  assert.equal(calls[1].payload.message_thread_id, undefined);
 }));

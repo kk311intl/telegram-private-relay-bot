@@ -52,7 +52,12 @@ test("三種部署語言都有完整的訊息文字", () => {
     unsupportedMessage: 1, deliveryFailed: 1, albumFailed: 1, untrackedDelivery: 1,
     groupId: 1, newChat: 1, receivedChat: 1, userDetails: 1, name: 1,
     username: 1, status: 1, blockedStatus: 1, normalStatus: 1,
-    notSet: 1, notProvided: 1, user: 1, fieldSeparator: 1
+    notSet: 1, notProvided: 1, user: 1, fieldSeparator: 1,
+    userHelp: 1, userCommand_start: 1, userCommand_help: 1, userCommand_id: 1,
+    userCommand_forget: 1, replyRequired: 1, topicRequired: 1, replyUnavailable: 1,
+    retryStopped: 1, statusLastRelay: 1, statusNoRelay: 1, statusLastError: 1,
+    statusNoError: 1, failureRateLimit: 1, failureUnavailable: 1, failurePermission: 1,
+    failureUnsupported: 1, failureProcessing: 1
   });
   for (const language of ["zh", "ja", "en"]) {
     for (const key of keys) assert.ok(t(language, key), `${language}.${key}`);

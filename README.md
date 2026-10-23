@@ -106,14 +106,18 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 
 | 使用位置 | 指令 | 用途 |
 |---|---|---|
-| 使用者私訊 Bot | `/start`、`/id` | 歡迎訊息、自己的 User ID |
+| 使用者私訊 Bot | `/start`、`/help`、`/id` | 歡迎訊息、使用說明、自己的 User ID |
 | 使用者私訊 Bot | `/forget`、`/forget confirm` | 查看清除說明、確認清除資料 |
 | 管理者私訊 Bot | `/start`、`/help`、`/status` | 設定選單、查指令、查近 24 小時處理狀態與 Webhook 待處理數 |
 | 管理者私訊 Bot | `/unblock USER_ID` | 依 ID 解封，包括已清除資料的封鎖者 |
 | 管理群組的使用者話題 | `/user`、`/block`、`/unblock`、`/close`、`/help`、`/status` | 查資料、封鎖／解封、關閉話題、查指令／狀態 |
 | 管理者私訊模式，管理者回覆轉來的訊息 | `/user`、`/block`、`/unblock` | 操作該訊息所屬的使用者 |
 
-管理權限只認 `ADMIN_USER_ID`；管理者私訊 Bot 傳送 `/start` 設定本人可見的選單，切換模式後可再傳一次。`/close` 只關閉話題，不封鎖使用者；要停止接收該使用者的訊息，請用 `/block`。
+管理權限只認 `ADMIN_USER_ID`。管理者私訊 `/start` 更新使用者選單及本人可見的管理選單，切換模式後可再傳一次。使用者 `/help` 不會轉給管理者，也不讀寫個人資料；選單不會在每則訊息重設。
+
+`/close` 只關閉話題，不封鎖使用者；新訊息會優先重開原話題，找不到話題才另建。要停止接收訊息請用 `/block`。管理者回覆失效對照、舊話題或錯誤位置時會收到「未送出」提示；話題無法發送提示時改私訊管理者。
+
+`/status` 排除查詢本身，並顯示最近成功轉送距今多久及近 24 小時最近異常的簡短原因。這些資訊只在手動查詢時從既有紀錄讀取，不新增輪詢、資料表或排程；轉送時間以仍保留的對照為準。
 
 ### 資料與限制
 
@@ -122,6 +126,8 @@ D1 保存路由所需的 User ID、顯示名稱／使用者名稱、話題／訊
 使用者傳 `/forget` 會先看到確認說明，只有傳 `/forget confirm` 才清除 Bot 的 D1 個人資料、相簿暫存及轉送對照。為防止舊請求重建資料，Bot 暫留不含顯示名稱的控制紀錄；非封鎖者的紀錄會在 7 天後依排程清理。被封鎖者的 ID、封鎖狀態與控制紀錄仍保留，管理者可私訊 Bot 傳送 `/unblock USER_ID` 解封。這**不會刪除 Telegram 兩端已有的聊天訊息或既有備份**；之後的新訊息可能重新建立資料。`/status` 也顯示處理中與處理逾時，但不能替代真人收發測試。
 
 超過 30 天的轉送對照會在下一次排程清理刪除；對照過期後，舊訊息編輯及管理者私訊模式的回覆可能無法路由。若 Telegram 已轉送卻沒有返回結果，重試仍可能重複送達；先核對兩端再決定重送。保存對照失敗時會重試保存，再嘗試撤回副本；兩者都失敗則停止自動重送並提示發送者。
+
+處理重試耗盡時，Bot 會盡力通知原發送者停止重試；重複更新不會重複觸發通知。提示不代表確定未送達，請先向對方確認。Telegram 不可用時通知也可能失敗；提示失敗不會重啟原訊息的轉送。
 
 ### 驗證與排查
 
@@ -248,14 +254,18 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 
 | 使用場所 | コマンド | 用途 |
 |---|---|---|
-| Bot との個別チャット（ユーザー） | `/start`、`/id` | 開始時のメッセージ、自分の User ID |
+| Bot との個別チャット（ユーザー） | `/start`、`/help`、`/id` | 開始時のメッセージ、使い方、自分の User ID |
 | Bot との個別チャット（ユーザー） | `/forget`、`/forget confirm` | 消去の説明、消去の確認 |
 | Bot との個別チャット（管理者） | `/start`、`/help`、`/status` | メニュー設定、コマンド案内、過去24時間の処理状況と Webhook 保留件数 |
 | Bot との個別チャット（管理者） | `/unblock USER_ID` | ID による解除。消去済みのブロックユーザーも対象 |
 | 管理グループのユーザートピック | `/user`、`/block`、`/unblock`、`/close`、`/help`、`/status` | 情報表示、ブロック／解除、トピックを閉じる、案内／状況確認 |
 | 管理者個別チャットモードで転送メッセージへの管理者の返信 | `/user`、`/block`、`/unblock` | そのメッセージのユーザーを操作 |
 
-管理権限は `ADMIN_USER_ID` だけで判定します。管理者が `/start` を個別チャットすると本人用のメニューを設定でき、モード変更後は再実行できます。`/close` はトピックを閉じるだけで、ユーザーをブロックしません。受信を止めるには `/block` を使ってください。
+管理権限は `ADMIN_USER_ID` だけで判定します。管理者が `/start` を個別チャットすると、ユーザー用メニューと本人専用の管理メニューを更新します。モード変更後は再実行できます。ユーザーの `/help` は管理者へ転送せず、個人情報を読み書きしません。メニューはメッセージごとに設定し直しません。
+
+`/close` はトピックを閉じるだけで、ユーザーをブロックしません。新着時は元のトピックを再開し、見つからない場合にのみ新規作成します。受信を止めるには `/block` を使ってください。失効した対応情報、古いトピック、誤った場所への管理者の返信には未送信の案内を返します。トピックに案内を送れない場合は管理者へ個別送信します。
+
+`/status` は自身のリクエストを集計から除き、最後の転送成功からの経過時間と過去24時間の直近のエラー概要を表示します。手動確認時に既存の記録を読むだけで、ポーリング・テーブル・定期処理は追加しません。転送時刻は保存中の対応情報に基づきます。
 
 ### データと制限
 
@@ -264,6 +274,8 @@ D1 には転送に必要な User ID、表示名／ユーザー名、トピック
 ユーザーが `/forget` を送ると確認方法が表示され、`/forget confirm` を送った場合にのみ Bot の D1 に保存された個人情報、アルバムの一時データ、メッセージの対応情報が消去されます。表示名を含まない再作成防止の記録を一時保持し、ブロックされていないユーザーの記録は7日後の定期処理で削除します。ブロック中の ID、ブロック状態、記録は残り、管理者は Bot との個別チャットで `/unblock USER_ID` を送って解除できます。**Telegram の既存メッセージとバックアップは削除されません**。以後の新しいメッセージは情報を再作成する場合があります。`/status` は処理中と処理期限切れも表示しますが、実際の送受信テストの代わりにはなりません。
 
 30 日を超えたメッセージの対応情報は次の定期クリーンアップで削除します。対応が失効すると古いメッセージの編集や管理者個別チャットモードの返信を転送できない場合があります。Telegram のコピー実行後に応答が失われると再試行で重複する可能性があるため、再送前に両側を確認してください。対応の保存は再試行し、失敗時はコピーの取り消しを試みます。両方失敗すると自動再送を止め、送信者に通知します。
+
+再試行の上限に達すると、元の送信者への停止通知を試みます。同じ更新の再配信で通知を繰り返しません。未着が確定したわけではないため、再送前に相手へ確認してください。Telegram が利用できない場合は通知も失敗し得ますが、元のメッセージの転送は再開しません。
 
 ### 確認とトラブル対応
 
@@ -390,14 +402,18 @@ Users message the bot privately. The admin replies in the matching topic or, in 
 
 | Where | Commands | Purpose |
 |---|---|---|
-| User's private chat with the bot | `/start`, `/id` | Welcome message, own User ID |
+| User's private chat with the bot | `/start`, `/help`, `/id` | Welcome message, instructions, own User ID |
 | User's private chat with the bot | `/forget`, `/forget confirm` | Erasure instructions, confirmed erasure |
 | Admin's private chat with the bot | `/start`, `/help`, `/status` | Set command menu, show help, see 24-hour processing and webhook pending count |
 | Admin's private chat with the bot | `/unblock USER_ID` | Unblock by ID, including blocked users who erased their data |
 | User topic in the admin group | `/user`, `/block`, `/unblock`, `/close`, `/help`, `/status` | User details, block/unblock, close topic, help/status |
 | Admin private-chat mode: reply to a relayed message | `/user`, `/block`, `/unblock` | Act on the user belonging to that message |
 
-Only `ADMIN_USER_ID` grants admin access. Send `/start` in your private chat with the bot to set the admin command menu; repeat it after switching modes. `/close` only closes a topic and does not block the user; use `/block` to stop accepting that user's messages.
+Only `ADMIN_USER_ID` grants admin access. The admin sends `/start` privately to refresh the user menu and their private admin menus; repeat after switching modes. A user's `/help` is not relayed and does not read or write personal data. Menus are not reset on every message.
+
+`/close` closes a topic without blocking the user. New messages reopen the original topic; a new topic is created only if the old one cannot be found. Use `/block` to stop accepting messages. Admin replies with expired mappings, in old topics, or in the wrong place receive a not-sent notice. If the topic cannot receive that notice, it is sent privately to the admin.
+
+`/status` excludes its own request and shows the time since the latest successful relay and a brief summary of the latest issue in the past 24 hours. It reads existing records only when requested, with no added polling, tables, or schedules. Relay times reflect retained mappings.
 
 ### Data and limits
 
@@ -406,6 +422,8 @@ D1 stores routing-related User IDs, display names/usernames, topic/message IDs, 
 Sending `/forget` shows confirmation instructions; only `/forget confirm` erases personal data, album staging, and relay mappings stored in the bot's D1. Records without display names prevent old requests from restoring data; unblocked users' records are removed by scheduled cleanup after 7 days. Blocked IDs, blocked state, and their records remain; the admin can send `/unblock USER_ID` in their private chat with the bot. This **does not delete existing Telegram messages or backups**. Later new messages may create data again. `/status` also shows processing updates and timeouts, but is not a substitute for a real two-way delivery test.
 
 Mappings older than 30 days are removed at the next scheduled cleanup. Once a mapping expires, old-message edits or replies in admin private-chat mode may no longer be routable. If Telegram copies a message but its response is lost, retrying can still deliver a duplicate; check both sides before resending. Mapping saves are retried, then the bot tries to remove the copy. If both fail, it stops automatic resending and notifies the sender.
+
+When processing retries are exhausted, the bot attempts to notify the original sender that retries have stopped. Duplicate updates do not trigger the notice again. This does not confirm non-delivery: check with the recipient before resending. The notice can also fail if Telegram is unavailable; that failure does not restart relay attempts.
 
 ### Verification and troubleshooting
 
