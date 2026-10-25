@@ -22,6 +22,8 @@ Version: v1.3.1 · License: [GPL-3.0-only](LICENSE)
 >
 > 遵守下方公開內容規則。Token 僅透過本機安全輸入或 Secret 欄位處理，不放入聊天、輸出或 Git；私有資料留在受 Git 忽略的位置。未經我要求，不覆寫既有設定、重建資源、輪替憑證、刪除還原備份、改寫程式、推送 GitHub 或建立 Release／tag。
 >
+> 首次聯絡的算術驗證預設開啟，除非我要求才關閉。升級時先套用 `0005_contact_verification.sql`，並用新測試帳號確認未驗證內容被攔截、答題後須重送內容。
+>
 > 最後檢查 `/health`、`/ready`、Webhook 和安全探針，指導我用非管理者帳號完成私訊往返測試。管理者私訊 `/start` 設定選單，再用 `/status` 確認；清除功能只用測試帳號。遇到阻礙時說明原因及下一個操作，不把未驗證項目當作完成。交付 Bot 連結、Worker 網址、模式、語言、驗證結果與憑證保管位置，不顯示秘密值。
 
 ### 準備
@@ -80,6 +82,7 @@ Cloudflare API Token 需要該帳戶的 Workers Scripts Edit 和 D1 Edit 權限�
 | `RATE_LIMIT_MESSAGE` | Text，可選 | 覆蓋傳送過快提示 |
 | `UNSUPPORTED_MESSAGE` | Text，可選 | 覆蓋訊息無法轉送提示 |
 | `MESSAGE_INTERVAL_SECONDS` | Text，可選 | 一般訊息間隔，預設 2 秒，範圍 0–60 |
+| `CAPTCHA_ENABLED` | Text，可選 | 算術驗證的初始預設，`true`／`false`，預設 `true`；Bot 內管理者設定優先 |
 
 未設定的提示訊息使用該語言的預設翻譯，自訂文字最多 4096 字元。[清理排程](https://developers.cloudflare.com/workers/configuration/cron-triggers/)在 `triggers.crons` 調整，採 UTC；範例 `17 3 * * *` 是每日 03:17 UTC，不是使用者本機時間。關閉排程也會停用定期清理。
 
@@ -110,6 +113,7 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 | 使用者私訊 Bot | `/forget`、`/forget confirm` | 查看清除說明、確認清除資料 |
 | 管理者私訊 Bot | `/start`、`/help`、`/status` | 設定選單、查指令、查近 24 小時處理狀態與 Webhook 待處理數 |
 | 管理者私訊 Bot | `/unblock USER_ID` | 依 ID 解封，包括已清除資料的封鎖者 |
+| 管理者私訊 Bot | `/captcha`、`/captcha on`、`/captcha off` | 查看、開啟或關閉首次聯絡驗證 |
 | 管理群組的使用者話題 | `/user`、`/block`、`/unblock`、`/close`、`/help`、`/status` | 查資料、封鎖／解封、關閉話題、查指令／狀態 |
 | 管理者私訊模式，管理者回覆轉來的訊息 | `/user`、`/block`、`/unblock` | 操作該訊息所屬的使用者 |
 
@@ -118,6 +122,16 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 `/close` 只關閉話題，不封鎖使用者；新訊息會優先重開原話題，找不到話題才另建。要停止接收訊息請用 `/block`。管理者回覆失效對照、舊話題或錯誤位置時會收到「未送出」提示；話題無法發送提示時改私訊管理者。
 
 `/status` 排除查詢本身，並顯示最近成功轉送距今多久及近 24 小時最近異常的簡短原因。這些資訊只在手動查詢時從既有紀錄讀取，不新增輪詢、資料表或排程；轉送時間以仍保留的對照為準。
+
+### 首次聯絡驗證
+
+新聯絡者先回答一道簡單加減乘除題，5 分鐘內只回覆數字；除法都是整數。連錯 3 次暫停 15 分鐘，再傳 `/start` 取得新題。一般錯誤至少間隔 5 秒才計次及回覆，指令提醒至少間隔 60 秒；冷卻中的訊息直接忽略。`/help`、`/id`、`/forget` 仍可使用。
+
+通過前不建立話題、不轉送或暫存內容；通過後須重送內容，答題與舊內容不會補送。升級前先套用 `0005_contact_verification.sql`：既有未清除的聯絡者免重驗，清除資料後返回則重新驗證。可在部署設定以 `CAPTCHA_ENABLED="false"` 關閉；`WELCOME_MESSAGE` 仍用於已通過者的 `/start`。
+
+管理者私訊 `/captcha` 查看狀態，用 `/captcha on` 或 `/captcha off` 切換，無須重新部署。開關保存在 D1，優先於部署預設；只在新聯絡者或未驗證者需要判斷時多讀取一筆設定。重新開啟不追溯要求已獲准聯絡者補驗，關閉也不解除既有封鎖。
+
+驗證只擋簡單自動廣告，能解題的程式或真人仍可通過。已通過者不增加 D1 查詢或寫入；未通過者只保存必要的 User ID 與驗證狀態，7 天未活動後用原有排程清除。沒有新增依賴、服務或排程；每個 Webhook 的既有去重寫入仍會消耗額度，這不是抗流量攻擊服務。
 
 ### 資料與限制
 
@@ -169,6 +183,8 @@ Telegram の個別チャットを管理者へ転送し、Bot を通して返信�
 > 私の Worker、D1、Bot を使い、`tools/` で管理者／グループ ID を安全に取得してください。下の手順で依存関係、テスト、`wrangler.jsonc`、`vars.BOT_LANGUAGE`、データベース移行、Secrets／Variables、Worker のデプロイを進めてください。新規なら `/ready` の成功後に Webhook を登録してください。既存なら対象のリソースを確認して D1 をバックアップし、元の設定と認証情報を使ってください。
 >
 > 下の公開ルールを守り、Token はローカルの安全な入力か Secret 欄だけで扱い、チャット・出力・Git に含めないでください。私有データは Git の対象外に置きます。依頼なしに既存設定の上書き、リソースの再作成、認証情報の更新、復旧用バックアップの削除、コード変更、GitHub への push、Release／tag の作成をしないでください。
+>
+> 初回の計算確認は既定で有効にし、私が依頼した場合だけ無効にしてください。更新時は先に `0005_contact_verification.sql` を適用し、新しいテストアカウントで未確認の内容が転送されないことと、確認後の再送が必要なことを確認してください。
 >
 > 最後に `/health`、`/ready`、Webhook、安全なプローブを確認し、管理者以外のアカウントで送信と返信を試せるよう案内してください。管理者には Bot との個別チャットで `/start` と `/status` を使ってもらい、消去機能はテスト用アカウントだけで確認してください。止まったら理由と次の操作を説明し、未確認の項目を完了扱いにしないでください。Bot のリンク、Worker URL、モード、言語、検証結果、認証情報の保管場所をまとめ、秘密の値は表示しないでください。
 
@@ -228,6 +244,7 @@ Cloudflare Worker の Variables and Secrets に次を設定します。
 | `RATE_LIMIT_MESSAGE` | Text、省略可 | 送信頻度の案内を上書き |
 | `UNSUPPORTED_MESSAGE` | Text、省略可 | 転送できないメッセージの案内を上書き |
 | `MESSAGE_INTERVAL_SECONDS` | Text、省略可 | 通常メッセージの間隔。既定は 2 秒、範囲は 0–60 |
+| `CAPTCHA_ENABLED` | Text、省略可 | 計算確認の初期設定。`true`／`false`、既定は `true`。Bot 内の管理者設定が優先 |
 
 案内文を設定しなければその言語の既定の翻訳を使い、カスタム文は最大 4096 文字です。[クリーンアップのスケジュール](https://developers.cloudflare.com/workers/configuration/cron-triggers/)は `triggers.crons` で変更し、時刻は UTC です。例の `17 3 * * *` は毎日 03:17 UTC で、ユーザーの現地時刻ではありません。スケジュールを無効にすると定期クリーンアップも停止します。
 
@@ -258,6 +275,7 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 | Bot との個別チャット（ユーザー） | `/forget`、`/forget confirm` | 消去の説明、消去の確認 |
 | Bot との個別チャット（管理者） | `/start`、`/help`、`/status` | メニュー設定、コマンド案内、過去24時間の処理状況と Webhook 保留件数 |
 | Bot との個別チャット（管理者） | `/unblock USER_ID` | ID による解除。消去済みのブロックユーザーも対象 |
+| Bot との個別チャット（管理者） | `/captcha`、`/captcha on`、`/captcha off` | 初回の確認の状態表示、有効化、無効化 |
 | 管理グループのユーザートピック | `/user`、`/block`、`/unblock`、`/close`、`/help`、`/status` | 情報表示、ブロック／解除、トピックを閉じる、案内／状況確認 |
 | 管理者個別チャットモードで転送メッセージへの管理者の返信 | `/user`、`/block`、`/unblock` | そのメッセージのユーザーを操作 |
 
@@ -266,6 +284,16 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 `/close` はトピックを閉じるだけで、ユーザーをブロックしません。新着時は元のトピックを再開し、見つからない場合にのみ新規作成します。受信を止めるには `/block` を使ってください。失効した対応情報、古いトピック、誤った場所への管理者の返信には未送信の案内を返します。トピックに案内を送れない場合は管理者へ個別送信します。
 
 `/status` は自身のリクエストを集計から除き、最後の転送成功からの経過時間と過去24時間の直近のエラー概要を表示します。手動確認時に既存の記録を読むだけで、ポーリング・テーブル・定期処理は追加しません。転送時刻は保存中の対応情報に基づきます。
+
+### 初回の確認
+
+初回は簡単な四則演算の問題に、5分以内に数字だけで答えます。割り算は割り切れます。3回間違えると15分間待ち、`/start` で再開します。誤答への応答と計数は最低5秒、コマンドによる案内は最低60秒の間隔を空け、待機中の新着は無視します。`/help`、`/id`、`/forget` は引き続き使えます。
+
+確認前はトピックを作らず、内容を転送・一時保存しません。確認後に内容を送り直す必要があり、答えや古い内容は後から転送しません。更新前に `0005_contact_verification.sql` を適用してください。既存の消去されていない連絡者は再確認不要で、データ消去後は再確認が必要です。デプロイ設定の `CAPTCHA_ENABLED="false"` で無効にできます。`WELCOME_MESSAGE` は確認済みユーザーの `/start` に使います。
+
+管理者が個別チャットで `/captcha` を送ると状態を確認でき、`/captcha on` または `/captcha off` で切り替えます。再デプロイは不要で、設定は D1 に保持され、デプロイの初期設定より優先されます。新規または未確認ユーザーの判定時だけ、設定を1件追加で読みます。再有効化しても連絡を許可済みのユーザーに再確認は要求せず、無効化してもブロックは解除しません。
+
+単純な自動広告を減らすための確認で、計算できるプログラムや人は通過できます。確認済みの通常転送に D1 の読み書きは追加しません。未確認者は必要な User ID と確認状態のみ保存し、7日間活動がなければ既存の定期処理で削除します。依存関係・サービス・定期処理の追加はありませんが、Webhook の既存の重複防止処理は引き続き枠を消費します。大量アクセスを防ぐ仕組みではありません。
 
 ### データと制限
 
@@ -317,6 +345,8 @@ Give the repository link and this prompt to an AI coding assistant that can read
 > Use my Worker, D1, and bot, and obtain my numeric admin/group IDs safely with `tools/`. Follow the steps below for dependencies, tests, `wrangler.jsonc`, `vars.BOT_LANGUAGE`, database migrations, Secrets/Variables, and Worker deployment. For a new deployment, confirm `/ready` before registering the webhook. For an existing deployment, identify its resources, back up D1, and reuse its settings and credentials.
 >
 > Follow the public-content rules below. Handle tokens only through secure local input or Secret fields, never chat, output, or Git; keep private data in Git-ignored locations. Without my request, do not overwrite existing settings, recreate resources, rotate credentials, delete recovery backups, change source code, push to GitHub, or create a Release/tag.
+>
+> Keep the first-contact arithmetic check enabled unless I request otherwise. Apply `0005_contact_verification.sql` before upgrading the Worker, and use a new test account to verify that content is held back and must be resent after passing.
 >
 > Verify `/health`, `/ready`, webhook status, and the safe runtime probe, then guide me through a real send-and-reply test with a non-admin account. Have the admin send `/start` and `/status` privately to the bot; use only test accounts for erasure. If blocked, explain why and give my next action; do not report unverified work as complete. Finish with the bot link, Worker URL, mode, language, checks, and credential storage location, without secret values.
 
@@ -376,6 +406,7 @@ Set these under the Worker's Variables and Secrets in Cloudflare:
 | `RATE_LIMIT_MESSAGE` | Text, optional | Overrides the rate-limit notice |
 | `UNSUPPORTED_MESSAGE` | Text, optional | Overrides the unsupported-message notice |
 | `MESSAGE_INTERVAL_SECONDS` | Text, optional | Minimum interval for ordinary messages; default 2 seconds, range 0–60 |
+| `CAPTCHA_ENABLED` | Text, optional | Initial arithmetic-check default: `true` / `false`, default `true`; the admin's in-bot setting takes precedence |
 
 Unset notices use that language's defaults; custom text is limited to 4096 characters. Change the [cleanup schedule](https://developers.cloudflare.com/workers/configuration/cron-triggers/) under `triggers.crons`, using UTC: the example `17 3 * * *` means daily at 03:17 UTC, not the user's local time. Disabling the schedule also disables periodic cleanup.
 
@@ -406,6 +437,7 @@ Users message the bot privately. The admin replies in the matching topic or, in 
 | User's private chat with the bot | `/forget`, `/forget confirm` | Erasure instructions, confirmed erasure |
 | Admin's private chat with the bot | `/start`, `/help`, `/status` | Set command menu, show help, see 24-hour processing and webhook pending count |
 | Admin's private chat with the bot | `/unblock USER_ID` | Unblock by ID, including blocked users who erased their data |
+| Admin's private chat with the bot | `/captcha`, `/captcha on`, `/captcha off` | Show, enable, or disable the first-contact check |
 | User topic in the admin group | `/user`, `/block`, `/unblock`, `/close`, `/help`, `/status` | User details, block/unblock, close topic, help/status |
 | Admin private-chat mode: reply to a relayed message | `/user`, `/block`, `/unblock` | Act on the user belonging to that message |
 
@@ -414,6 +446,16 @@ Only `ADMIN_USER_ID` grants admin access. The admin sends `/start` privately to 
 `/close` closes a topic without blocking the user. New messages reopen the original topic; a new topic is created only if the old one cannot be found. Use `/block` to stop accepting messages. Admin replies with expired mappings, in old topics, or in the wrong place receive a not-sent notice. If the topic cannot receive that notice, it is sent privately to the admin.
 
 `/status` excludes its own request and shows the time since the latest successful relay and a brief summary of the latest issue in the past 24 hours. It reads existing records only when requested, with no added polling, tables, or schedules. Relay times reflect retained mappings.
+
+### First-contact check
+
+New contacts answer a simple arithmetic question with digits only within 5 minutes. Division always has an integer answer. Three wrong answers require a 15-minute wait, then `/start` starts a new check. Wrong attempts and responses are spaced at least 5 seconds apart; command reminders are spaced at least 60 seconds apart. New messages during the cooldown are ignored. `/help`, `/id`, and `/forget` remain available.
+
+Before passing, no topic is created and content is neither relayed nor queued. Users must resend their content after passing; answers and earlier content are never replayed. Apply `0005_contact_verification.sql` before upgrading: existing contacts whose data was not erased keep access, while returning users who erased their data verify again. Set `CAPTCHA_ENABLED="false"` in deployment settings to disable the check. `WELCOME_MESSAGE` still applies to verified users' `/start`.
+
+The admin sends `/captcha` privately to view the state, or `/captcha on` / `/captcha off` to change it without redeploying. The setting persists in D1 and takes precedence over the deployment default. Only new or unverified contacts add one settings-row read when needed. Re-enabling does not require previously admitted contacts to verify again, and disabling does not remove existing blocks.
+
+This reduces simple automated ads; programs that solve arithmetic and people can still pass. Verified traffic adds no D1 queries or writes. Pending contacts store only their necessary User ID and verification state and are removed after 7 inactive days by the existing cleanup. No dependencies, services, or schedules are added. Existing webhook deduplication still consumes quota on each update; this is not flood protection.
 
 ### Data and limits
 

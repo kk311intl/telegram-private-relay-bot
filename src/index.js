@@ -9,6 +9,8 @@ const TOPIC_LEASE_SECONDS = 30;
 const MEDIA_GROUP_QUIET_MS = 900;
 const CONVERSATION_WINDOW_SECONDS = 6 * 60 * 60;
 const TELEGRAM_TIMEOUT_MS = 15_000;
+const CAPTCHA_TTL_SECONDS = 300;
+const CAPTCHA_COOLDOWN_SECONDS = 900;
 let botIdentity;
 
 export default {
@@ -168,6 +170,21 @@ async function processAdminPrivateMessage(message, env) {
     return;
   }
   if (command === "status") return sendAdminStatus(message.chat.id, undefined, env);
+  if (command === "captcha") {
+    const mode = /^\/captcha(?:@[A-Za-z0-9_]+)?\s+(on|off)\s*$/i.exec(message.text.trim())?.[1].toLowerCase();
+    if (mode) {
+      await env.BOT_DB.prepare(`
+        UPDATE bot_settings SET captcha_enabled = ?, captcha_message_id = ?
+        WHERE id = 1 AND captcha_message_id < ?
+      `).bind(mode === "on" ? 1 : 0, message.message_id, message.message_id).run();
+    }
+    await telegram(env, "sendMessage", {
+      chat_id: message.chat.id,
+      text: t(env.BOT_LANGUAGE, await captchaEnabled(env) ? "captchaEnabled" : "captchaDisabled")
+        + "\n\n" + t(env.BOT_LANGUAGE, "captchaControls")
+    });
+    return;
+  }
   if (command === "unblock") {
     const targetId = /^\/unblock(?:@[A-Za-z0-9_]+)?\s+(\d+)\s*$/i.exec(message.text.trim())?.[1];
     if (targetId) {
@@ -204,8 +221,8 @@ async function configureAdminMenu(env) {
     await telegram(env, "setMyCommands", {
       scope: { type: "chat", chat_id: env.ADMIN_USER_ID },
       commands: commands(env.ADMIN_GROUP_ID
-        ? ["start", "help", "status", "unblock"]
-        : ["start", "help", "status", "user", "block", "unblock"])
+        ? ["start", "help", "status", "captcha", "unblock"]
+        : ["start", "help", "status", "captcha", "user", "block", "unblock"])
     });
     if (env.ADMIN_GROUP_ID) {
       await telegram(env, "setMyCommands", {
@@ -294,18 +311,17 @@ function summarizeFailure(error, language) {
 
 async function processUserMessage(message, env) {
   const command = parseCommand(message.text);
-  if (command === "help") {
+  if (command === "help" || command === "id") {
     await telegram(env, "sendMessage", {
       chat_id: message.chat.id,
-      text: t(env.BOT_LANGUAGE, "userHelp")
+      text: command === "help" ? t(env.BOT_LANGUAGE, "userHelp")
+        : `${t(env.BOT_LANGUAGE, "userId")}${t(env.BOT_LANGUAGE, "fieldSeparator")}${message.from.id}`
     });
     return;
   }
   const now = Math.floor(Date.now() / 1000);
   const userId = String(message.from.id);
   let user = await getUser(env.BOT_DB, userId);
-
-  if (await getMessageMap(env.BOT_DB, String(message.chat.id), message.message_id)) return;
 
   if (command === "forget") {
     const confirmed = /^\/forget(?:@[A-Za-z0-9_]+)?\s+confirm\s*$/i.test(message.text.trim());
@@ -332,6 +348,20 @@ async function processUserMessage(message, env) {
     return;
   }
 
+  if (message.message_id <= (user?.forgotten_message_id || 0)) return;
+  const needsCaptcha = !user?.captcha_verified && await captchaEnabled(env);
+  // Never relay a verification answer or earlier content after verification succeeds.
+  if (user?.captcha_message_id >= message.message_id) {
+    if (user.captcha_verified && user.captcha_message_id === message.message_id) {
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: t(env.BOT_LANGUAGE, "captchaPassed") });
+    } else if (needsCaptcha) await processCaptcha(message, user, env, now);
+    return;
+  }
+  if (needsCaptcha) {
+    return processCaptcha(message, user, env, now);
+  }
+  if (await getMessageMap(env.BOT_DB, String(message.chat.id), message.message_id)) return;
+
   const interval = clampInteger(
     env.MESSAGE_INTERVAL_SECONDS,
     0,
@@ -348,14 +378,6 @@ async function processUserMessage(message, env) {
     });
     return;
   }
-  if (command === "id") {
-    await telegram(env, "sendMessage", {
-      chat_id: message.chat.id,
-      text: `${t(env.BOT_LANGUAGE, "userId")}${t(env.BOT_LANGUAGE, "fieldSeparator")}${userId}`
-    });
-    return;
-  }
-
   if (message.media_group_id) {
     const queued = await enqueueMediaMessage(message, user, "user_to_admin", env, now, interval);
     if (queued.rejected) {
@@ -414,6 +436,89 @@ async function processUserMessage(message, env) {
   await saveCopiedMessage(env, user, message, copied, env.ADMIN_GROUP_ID, now);
 }
 
+export function captchaQuestion(code) {
+  const a = Math.floor(code / 4) % 9 + 1;
+  const b = Math.floor(code / 36) + 1;
+  switch (code % 4) {
+    case 0: return { question: `${a} + ${b}`, answer: a + b };
+    case 1: return { question: `${Math.max(a, b)} − ${Math.min(a, b)}`, answer: Math.abs(a - b) };
+    case 2: return { question: `${a} × ${b}`, answer: a * b };
+    default: return { question: `${a * b} ÷ ${b}`, answer: a };
+  }
+}
+
+async function captchaEnabled(env) {
+  const settings = await env.BOT_DB.prepare("SELECT captcha_enabled FROM bot_settings WHERE id = 1").first();
+  if (!settings) throw new RetryableError("驗證開關設定遺失，暫停處理");
+  return settings.captcha_enabled == null ? env.CAPTCHA_ENABLED !== "false" : settings.captcha_enabled === 1;
+}
+
+async function processCaptcha(message, user, env, now) {
+  const db = env.BOT_DB;
+  if (!user) {
+    await db.prepare("INSERT OR IGNORE INTO users(user_id, created_at, updated_at) VALUES (?, ?, ?)")
+      .bind(String(message.from.id), now, now).run();
+    user = await getUser(db, String(message.from.id));
+  }
+  if (!user || user.blocked || user.captcha_verified || message.message_id <= user.forgotten_message_id) return;
+  const send = (key, code = user.captcha_code) => telegram(env, "sendMessage", {
+    chat_id: message.chat.id,
+    text: t(env.BOT_LANGUAGE, key).replace("{question}", code == null ? "" : captchaQuestion(code).question)
+  });
+  if (message.message_id <= user.captcha_message_id) {
+    if (message.message_id === user.captcha_message_id) {
+      await send(user.captcha_until <= now ? "captchaExpired" : user.captcha_attempts >= 3
+        ? "captchaLocked" : user.captcha_attempts > 0 ? "captchaWrong" : "captchaPrompt");
+    }
+    return;
+  }
+  if (user.captcha_attempts >= 3 && user.captcha_until > now) return;
+  if (user.captcha_code == null || user.captcha_until <= now) {
+    const code = crypto.getRandomValues(new Uint32Array(1))[0] % 324;
+    const result = await db.prepare(`
+      UPDATE users SET captcha_code = ?, captcha_until = ?, captcha_attempts = 0,
+        captcha_last_at = ?, captcha_message_id = ?, erased = 0, updated_at = ?
+      WHERE user_id = ? AND generation = ? AND blocked = 0 AND captcha_verified = 0
+        AND forgotten_message_id < ? AND captcha_message_id < ?
+        AND (captcha_code IS NULL OR captcha_until <= ?)
+    `).bind(code, now + CAPTCHA_TTL_SECONDS, now, message.message_id, now,
+      user.user_id, user.generation, message.message_id, message.message_id, now).run();
+    if (Number(result.meta?.changes || 0) === 1) await send("captchaPrompt", code);
+    return;
+  }
+
+  const answer = typeof message.text === "string" && message.text.length <= 16
+    ? message.text.normalize("NFKC").trim() : "";
+  if (/^\d{1,3}$/.test(answer) && Number(answer) === captchaQuestion(user.captcha_code).answer) {
+    const result = await db.prepare(`
+      UPDATE users SET captcha_verified = 1, captcha_code = NULL, captcha_until = 0,
+        captcha_attempts = 0, captcha_last_at = ?, captcha_message_id = ?, erased = 0, updated_at = ?
+      WHERE user_id = ? AND generation = ? AND blocked = 0 AND captcha_verified = 0
+        AND captcha_code = ? AND captcha_until > ? AND captcha_attempts < 3
+        AND forgotten_message_id < ? AND captcha_message_id < ?
+    `).bind(now, message.message_id, now, user.user_id, user.generation,
+      user.captcha_code, now, message.message_id, message.message_id).run();
+    if (Number(result.meta?.changes || 0) === 1) await send("captchaPassed");
+    return;
+  }
+
+  const reminder = Boolean(parseCommand(message.text));
+  if (user.captcha_last_at > now - (reminder ? 60 : 5)) return;
+  const attempts = user.captcha_attempts + (reminder ? 0 : 1);
+  const result = await db.prepare(`
+    UPDATE users SET captcha_attempts = ?, captcha_until = ?, captcha_last_at = ?,
+      captcha_message_id = ?, updated_at = ?
+    WHERE user_id = ? AND generation = ? AND blocked = 0 AND captcha_verified = 0
+      AND captcha_code = ? AND captcha_until > ? AND captcha_attempts = ?
+      AND captcha_last_at = ? AND forgotten_message_id < ? AND captcha_message_id < ?
+  `).bind(attempts, attempts >= 3 ? now + CAPTCHA_COOLDOWN_SECONDS : user.captcha_until,
+    now, message.message_id, now, user.user_id, user.generation, user.captcha_code,
+    now, user.captcha_attempts, user.captcha_last_at, message.message_id, message.message_id).run();
+  if (Number(result.meta?.changes || 0) === 1) {
+    await send(attempts >= 3 ? "captchaLocked" : reminder ? "captchaPrompt" : "captchaWrong");
+  }
+}
+
 async function forgetUser(db, userId, messageId, now) {
   await db.batch([
     db.prepare(`
@@ -437,6 +542,8 @@ async function forgetUser(db, userId, messageId, now) {
       UPDATE users SET username = NULL, first_name = '', last_name = '', topic_id = NULL,
         topic_card_message_id = NULL, topic_lease_until = 0, topic_lease_token = NULL,
         last_rate_key = NULL, blocked_notice_at = 0, updated_at = ?,
+        captcha_verified = 0, captcha_code = NULL, captcha_until = 0, captcha_attempts = 0,
+        captcha_last_at = 0, captcha_message_id = 0,
         generation = generation + 1, erased = 1, forgotten_message_id = ?, forgotten_at = ?
       WHERE user_id = ? AND forgotten_message_id < ?
     `).bind(now, messageId, now, userId, messageId)
@@ -666,6 +773,12 @@ async function processEditedMessage(message, env) {
     && String(message.from?.id) === String(env.ADMIN_USER_ID);
   if (!isUserEdit && !isAdminTopicEdit && !isAdminPrivateEdit) return;
 
+  let editingUser;
+  if (isUserEdit) {
+    editingUser = await getUser(env.BOT_DB, String(message.from.id));
+    if (editingUser?.blocked || editingUser?.erased || (!editingUser?.captcha_verified && await captchaEnabled(env))
+      || message.message_id <= (editingUser?.captcha_message_id || 0)) return;
+  }
   const mapping = await env.BOT_DB.prepare(
     "SELECT target_chat_id, target_message_id, user_id FROM message_map WHERE source_chat_id = ? AND source_message_id = ?"
   ).bind(chatId, message.message_id).first();
@@ -674,11 +787,7 @@ async function processEditedMessage(message, env) {
     if (isAdminPrivateEdit && !message.reply_to_message?.message_id) return;
     throw new RetryableError("編輯訊息尚未建立轉送映射");
   }
-
-  if (isUserEdit) {
-    const user = await getUser(env.BOT_DB, mapping.user_id);
-    if (!user || user.blocked || user.erased) return;
-  }
+  if (isUserEdit && !editingUser) return;
 
   const method = isText ? "editMessageText" : "editMessageCaption";
   const payload = {
@@ -1293,13 +1402,14 @@ async function getUserByTopic(db, topicId) {
 async function upsertUser(db, from, now, messageId) {
   const userId = String(from.id);
   await db.prepare(`
-    INSERT INTO users(user_id, username, first_name, last_name, created_at, updated_at, last_message_at)
-    VALUES (?, ?, ?, ?, ?, ?, 0)
+    INSERT INTO users(user_id, username, first_name, last_name, created_at, updated_at, last_message_at, captcha_verified)
+    VALUES (?, ?, ?, ?, ?, ?, 0, 1)
     ON CONFLICT(user_id) DO UPDATE SET
       username = excluded.username,
       first_name = excluded.first_name,
       last_name = excluded.last_name,
       updated_at = excluded.updated_at,
+      captcha_verified = 1,
       erased = 0
     WHERE users.forgotten_message_id < ? AND users.blocked = 0
   `).bind(
@@ -1449,7 +1559,9 @@ async function cleanDatabase(db) {
     db.prepare("DELETE FROM media_group_messages WHERE created_at < ?").bind(now - 2 * 86400),
     db.prepare("DELETE FROM media_groups WHERE created_at < ?").bind(now - 2 * 86400),
     db.prepare("DELETE FROM rate_admissions WHERE created_at < ?").bind(now - 2 * 86400),
-    db.prepare("DELETE FROM users WHERE erased = 1 AND blocked = 0 AND forgotten_at < ?").bind(now - 7 * 86400)
+    db.prepare(`DELETE FROM users WHERE blocked = 0 AND
+      ((erased = 1 AND forgotten_at < ?) OR (captcha_verified = 0 AND updated_at < ? AND forgotten_at < ?))
+    `).bind(now - 7 * 86400, now - 7 * 86400, now - 7 * 86400)
   ]);
 }
 
@@ -1458,14 +1570,19 @@ async function readiness(env) {
     return json({ ok: false, service: "telegram-private-relay" }, { status: 503 });
   }
   try {
-    await env.BOT_DB.prepare(`
+    const schema = await env.BOT_DB.prepare(`
       SELECT (SELECT generation FROM users LIMIT 1) AS generation,
         (SELECT forgotten_message_id FROM users LIMIT 1) AS forgotten_message_id,
+        (SELECT captcha_verified + captcha_until + captcha_attempts + captcha_last_at + captcha_message_id
+          + COALESCE(captcha_code, 0) FROM users LIMIT 1) AS captcha,
         (SELECT lease_token FROM processed_updates LIMIT 1) AS update_lease,
         (SELECT user_generation FROM media_groups LIMIT 1) AS album_generation,
         (SELECT lease_token FROM media_groups LIMIT 1) AS album_lease,
-        (SELECT COUNT(*) FROM rate_admissions WHERE 0) AS admissions
+        (SELECT COUNT(*) FROM rate_admissions WHERE 0) AS admissions,
+        (SELECT COUNT(*) FROM bot_settings WHERE id = 1 AND (captcha_enabled IS NULL OR captcha_enabled IN (0, 1))
+          AND captcha_message_id >= 0) AS captcha_settings
     `).first();
+    if (schema?.captcha_settings !== 1) throw new Error("驗證開關設定遺失");
     return json({ ok: true, service: "telegram-private-relay" });
   } catch {
     return json({ ok: false, service: "telegram-private-relay" }, { status: 503 });
@@ -1481,6 +1598,7 @@ export function configurationIssue(env) {
     if (!/^-100\d+$/.test(String(env.ADMIN_GROUP_ID))) return "ADMIN_GROUP_ID";
   }
   if (env.BOT_LANGUAGE != null && !["zh", "ja", "en"].includes(env.BOT_LANGUAGE)) return "BOT_LANGUAGE";
+  if (env.CAPTCHA_ENABLED != null && !["true", "false"].includes(env.CAPTCHA_ENABLED)) return "CAPTCHA_ENABLED";
   for (const name of ["WELCOME_MESSAGE", "BLOCKED_MESSAGE", "RATE_LIMIT_MESSAGE", "UNSUPPORTED_MESSAGE"]) {
     if (env[name] != null && (typeof env[name] !== "string" || env[name].length > 4096)) return name;
   }

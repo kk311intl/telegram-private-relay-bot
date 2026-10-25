@@ -4,7 +4,7 @@ const messages = {
     adminReadyDirect: "管理者私訊模式。\n請回覆 Bot 轉來的使用者訊息；傳送 /help 查看指令。",
     blockedNotice: "目前無法接收你的訊息。",
     welcome: "請在此傳送訊息。管理者可透過 Bot 回覆。\n傳送 /help 查看使用說明。",
-    userHelp: `直接傳送文字或一般媒體，管理者可透過 Bot 回覆。
+    userHelp: `直接傳送文字或一般媒體，管理者可透過 Bot 回覆。首次聯絡可能需要算術驗證，通過後請重新傳送內容。
 
 /start — 查看歡迎訊息
 /help — 查看使用說明
@@ -14,6 +14,14 @@ const messages = {
     userCommand_help: "查看使用說明",
     userCommand_id: "查看自己的 User ID",
     userCommand_forget: "查看資料清除說明",
+    captchaPrompt: "首次聯絡請先驗證：{question} = ?\n請在 5 分鐘內只回覆數字；連錯 3 次須等 15 分鐘。\n驗證前的訊息未轉送，通過後請重新傳送內容。",
+    captchaWrong: "答案不正確，請只回覆數字：{question} = ?\n連錯 3 次須等 15 分鐘；原題有效時間不變。",
+    captchaLocked: "錯誤次數已達上限，請等 15 分鐘後傳送 /start 重新驗證。訊息未轉送。",
+    captchaExpired: "驗證已到期，請傳送 /start 取得新題目。訊息未轉送。",
+    captchaPassed: "驗證通過。請重新傳送要聯絡管理者的內容；先前的訊息與答案不會轉送。",
+    captchaEnabled: "首次聯絡驗證：已開啟",
+    captchaDisabled: "首次聯絡驗證：已關閉",
+    captchaControls: "/captcha on — 開啟\n/captcha off — 關閉\n僅管理者私訊可修改，設定會保留。已驗證者不受影響，封鎖仍有效。",
     replyRequired: "這則訊息未送出。請使用「回覆」選擇 Bot 轉來的使用者訊息。",
     topicRequired: "這則訊息未送出。請在對應使用者的話題內回覆。",
     replyUnavailable: "這則訊息未送出：轉送對照已失效或不存在。請使用對方的新訊息或最新話題回覆。",
@@ -34,6 +42,7 @@ const messages = {
 
 私訊 Bot：
 /unblock USER_ID — 依 ID 解除封鎖
+/captcha — 查看首次聯絡驗證；用 on／off 開關
 
 話題內的一般訊息會送給該使用者。`,
     adminHelpDirect: `管理者私訊模式
@@ -46,6 +55,7 @@ const messages = {
 私訊 Bot：
 /status — 查看近 24 小時處理狀態
 /unblock USER_ID — 依 ID 解除封鎖
+/captcha — 查看首次聯絡驗證；用 on／off 開關
 
 一般回覆會送給該使用者。`,
     adminStatus: "近 24 小時處理狀態",
@@ -86,6 +96,7 @@ const messages = {
     command_block: "封鎖使用者",
     command_unblock: "解除封鎖",
     command_close: "關閉使用者話題",
+    command_captcha: "開關首次聯絡驗證",
     unsupportedMessage: "這類訊息目前無法轉送，請改用文字或一般媒體後再試。",
     deliveryFailed: "訊息無法送達；對方可能已封鎖 Bot，或該訊息類型不支援轉送。",
     albumFailed: "相簿無法完整送達；對方可能已封鎖 Bot，或其中包含不支援的內容。",
@@ -109,7 +120,7 @@ const messages = {
     adminReadyDirect: "管理者個別チャットモードです。\n転送されたメッセージに返信してください。/help でコマンドを確認できます。",
     blockedNotice: "現在、メッセージを受け付けられません。",
     welcome: "ここにメッセージを送ってください。管理者はこのチャットに返信できます。\n/help で使い方を確認できます。",
-    userHelp: `テキストや一般的なメディアを送信すると、管理者が Bot を通して返信できます。
+    userHelp: `テキストや一般的なメディアを送信すると、管理者が Bot を通して返信できます。初回は計算による確認が必要な場合があります。確認後に内容を送り直してください。
 
 /start — 開始時のメッセージを表示
 /help — 使い方を表示
@@ -119,6 +130,14 @@ const messages = {
     userCommand_help: "使い方を表示",
     userCommand_id: "自分の User ID を表示",
     userCommand_forget: "データ消去の説明を表示",
+    captchaPrompt: "初めての連絡では確認が必要です：{question} = ?\n5分以内に数字だけを送ってください。3回間違えると15分間待つ必要があります。\n確認前のメッセージは転送しません。確認後に内容を送り直してください。",
+    captchaWrong: "答えが違います。数字だけを送ってください：{question} = ?\n3回間違えると15分間待つ必要があります。有効期限は延長されません。",
+    captchaLocked: "間違いの上限に達しました。15分後に /start を送って再確認してください。メッセージは転送していません。",
+    captchaExpired: "確認の期限が切れました。/start で新しい問題を取得してください。メッセージは転送していません。",
+    captchaPassed: "確認できました。管理者に連絡したい内容を送り直してください。確認前のメッセージや答えは転送しません。",
+    captchaEnabled: "初回の計算確認：有効",
+    captchaDisabled: "初回の計算確認：無効",
+    captchaControls: "/captcha on — 有効にする\n/captcha off — 無効にする\n管理者との個別チャットでのみ変更でき、設定は保持されます。確認済みユーザーとブロック状態には影響しません。",
     replyRequired: "このメッセージは送信されていません。Bot が転送したユーザーのメッセージを選んで返信してください。",
     topicRequired: "このメッセージは送信されていません。該当ユーザーのトピックで返信してください。",
     replyUnavailable: "このメッセージは送信されていません。転送の対応情報が失効したか、存在しません。ユーザーの新しいメッセージか最新のトピックから返信してください。",
@@ -139,6 +158,7 @@ const messages = {
 
 Bot との個別チャット：
 /unblock USER_ID — ID でブロックを解除
+/captcha — 初回の確認を表示・設定（on／off）
 
 トピック内の通常のメッセージは、そのユーザーに送られます。`,
     adminHelpDirect: `管理者個別チャットモード
@@ -151,6 +171,7 @@ Bot との個別チャット：
 Bot との個別チャット：
 /status — 過去24時間の処理状況を表示
 /unblock USER_ID — ID でブロックを解除
+/captcha — 初回の確認を表示・設定（on／off）
 
 通常の返信は、そのユーザーに送られます。`,
     adminStatus: "過去24時間の処理状況",
@@ -191,6 +212,7 @@ Bot との個別チャット：
     command_block: "ユーザーをブロック",
     command_unblock: "ブロックを解除",
     command_close: "ユーザートピックを閉じる",
+    command_captcha: "初回の計算確認を設定",
     unsupportedMessage: "この種類のメッセージは転送できません。テキストまたは一般的なメディアで再度お試しください。",
     deliveryFailed: "メッセージを届けられませんでした。相手が Bot をブロックしているか、この種類のメッセージを転送できない可能性があります。",
     albumFailed: "アルバムを完全には届けられませんでした。相手が Bot をブロックしているか、対応していない内容が含まれている可能性があります。",
@@ -214,7 +236,7 @@ Bot との個別チャット：
     adminReadyDirect: "Admin private-chat mode.\nReply to a message relayed by the bot. Send /help for commands.",
     blockedNotice: "This bot is not accepting your messages right now.",
     welcome: "Send a message here. The admin can reply in this chat.\nSend /help for instructions.",
-    userHelp: `Send text or standard media here. The admin can reply through the bot.
+    userHelp: `Send text or standard media here. The admin can reply through the bot. First contact may require an arithmetic check; resend your message after passing it.
 
 /start — Show the welcome message
 /help — Show instructions
@@ -224,6 +246,14 @@ Bot との個別チャット：
     userCommand_help: "Show instructions",
     userCommand_id: "Show your User ID",
     userCommand_forget: "Show erasure instructions",
+    captchaPrompt: "Please verify before your first contact: {question} = ?\nReply with digits only within 5 minutes. Three wrong answers require a 15-minute wait.\nMessages sent before verification are not relayed. Resend your message after passing.",
+    captchaWrong: "Incorrect answer. Reply with digits only: {question} = ?\nThree wrong answers require a 15-minute wait. The original expiry still applies.",
+    captchaLocked: "Too many wrong answers. Wait 15 minutes, then send /start for a new check. Your messages were not relayed.",
+    captchaExpired: "The check has expired. Send /start for a new question. Your messages were not relayed.",
+    captchaPassed: "Verification passed. Resend the message you want the admin to receive. Earlier messages and your answer are not relayed.",
+    captchaEnabled: "First-contact check: enabled",
+    captchaDisabled: "First-contact check: disabled",
+    captchaControls: "/captcha on — Enable\n/captcha off — Disable\nOnly the admin can change this in their private chat. The setting persists. Verified contacts and blocks are unaffected.",
     replyRequired: "This message was not sent. Use Reply on a user message relayed by the bot.",
     topicRequired: "This message was not sent. Reply in the matching user's topic.",
     replyUnavailable: "This message was not sent: the relay mapping has expired or does not exist. Reply to a new message from the user or use their latest topic.",
@@ -244,6 +274,7 @@ In a user's topic:
 
 In your private chat with the bot:
 /unblock USER_ID — Unblock by ID
+/captcha — Show the first-contact check; use on/off to change it
 
 Regular messages in the topic go to that user.`,
     adminHelpDirect: `Admin private-chat mode
@@ -256,6 +287,7 @@ Reply to a relayed message:
 In your private chat with the bot:
 /status — Show processing status for the past 24 hours
 /unblock USER_ID — Unblock by ID
+/captcha — Show the first-contact check; use on/off to change it
 
 Regular replies go to that user.`,
     adminStatus: "Processing status — past 24 hours",
@@ -296,6 +328,7 @@ Erasure scope:
     command_block: "Block user",
     command_unblock: "Unblock user",
     command_close: "Close user topic",
+    command_captcha: "Manage first-contact check",
     unsupportedMessage: "This type of message cannot be forwarded. Please try text or a standard media message.",
     deliveryFailed: "Message could not be delivered. The recipient may have blocked the bot, or this message type may not be supported.",
     albumFailed: "The album could not be delivered in full. The recipient may have blocked the bot, or it may contain unsupported content.",

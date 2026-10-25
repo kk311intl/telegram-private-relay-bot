@@ -85,6 +85,9 @@ test("設定驗證拒絕空白或格式錯誤的管理 ID", () => {
   assert.equal(configurationIssue({ ...base, ADMIN_USER_ID: "1", BOT_LANGUAGE: "ja" }), null);
   assert.equal(configurationIssue({ ...base, ADMIN_USER_ID: "1", WELCOME_MESSAGE: "x".repeat(4097) }), "WELCOME_MESSAGE");
   assert.equal(configurationIssue({ ...base, ADMIN_USER_ID: "1", BLOCKED_MESSAGE: "短訊息" }), null);
+  assert.equal(configurationIssue({ ...base, ADMIN_USER_ID: "1", CAPTCHA_ENABLED: "false" }), null);
+  assert.equal(configurationIssue({ ...base, ADMIN_USER_ID: "1", CAPTCHA_ENABLED: "true" }), null);
+  assert.equal(configurationIssue({ ...base, ADMIN_USER_ID: "1", CAPTCHA_ENABLED: "off" }), "CAPTCHA_ENABLED");
 });
 
 test("非指定群組的更新直接忽略", async () => {

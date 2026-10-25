@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import worker, { processUpdate } from "../src/index.js";
+import worker, { captchaQuestion, processUpdate } from "../src/index.js";
 import { t } from "../src/i18n.js";
 
 class BoundStatement {
@@ -113,7 +113,7 @@ function injectWriteFailure(db, matches, times = 1) {
 }
 
 function auditEnv(db, topic = true) {
-  return { BOT_DB: db, BOT_TOKEN: "test-token", WEBHOOK_SECRET: "test-secret", ADMIN_USER_ID: "1",
+  return { BOT_DB: db, CAPTCHA_ENABLED: "false", BOT_TOKEN: "test-token", WEBHOOK_SECRET: "test-secret", ADMIN_USER_ID: "1",
     ...(topic ? { ADMIN_GROUP_ID: "-1001" } : {}) };
 }
 
@@ -394,6 +394,7 @@ test("七天後清理非封鎖清除控制紀錄，保留封鎖紀錄與重新�
   await db.prepare(`INSERT INTO users(user_id,blocked,erased,forgotten_at,created_at,updated_at)
     VALUES ('2',0,1,?,?,?),('3',1,1,?,?,?),('4',0,0,?,?,?)`)
     .bind(old, old, old, old, old, old, old, old, old).run();
+  await db.prepare("UPDATE users SET captcha_verified=1 WHERE user_id='4'").run();
   let cleanup;
   await worker.scheduled({}, auditEnv(db), { waitUntil(promise) { cleanup = promise; } });
   await cleanup;
@@ -477,11 +478,11 @@ test("撤回失敗時告知發送者並停止同一更新自動重送", () => wi
 }));
 
 test("ready 拒絕缺少新 migration 的 D1，套用後恢復", async () => {
-  const db = new TestD1(3);
+  const db = new TestD1(4);
   try {
     const request = () => new Request("https://example.com/ready");
     assert.equal((await worker.fetch(request(), auditEnv(db))).status, 503);
-    db.database.exec(readFileSync(new URL("../migrations/0004_recovery_and_erasure.sql", import.meta.url), "utf8"));
+    db.database.exec(readFileSync(new URL("../migrations/0005_contact_verification.sql", import.meta.url), "utf8"));
     assert.equal((await worker.fetch(request(), auditEnv(db))).status, 200);
   } finally { db.close(); }
 });
@@ -495,11 +496,11 @@ test("管理者 /start 更新使用者選單，管理指令仍只對本人可見
   await processUpdate({ message: {
     message_id: 1, chat: { id: 1, type: "private" },
     from: { id: 1, is_bot: false }, text: "/start"
-  } }, { BOT_TOKEN: "test-token", ADMIN_USER_ID: "1", ADMIN_GROUP_ID: "-1001", BOT_DB: db });
+  } }, { BOT_TOKEN: "test-token", ADMIN_USER_ID: "1", ADMIN_GROUP_ID: "-1001", BOT_DB: db, CAPTCHA_ENABLED: "false" });
   const menus = calls.filter((call) => call.method === "setMyCommands");
   assert.equal(menus.length, 3);
   assert.deepEqual(menus[0].payload.scope, { type: "chat", chat_id: "1" });
-  assert.deepEqual(menus[0].payload.commands.map((item) => item.command), ["start", "help", "status", "unblock"]);
+  assert.deepEqual(menus[0].payload.commands.map((item) => item.command), ["start", "help", "status", "captcha", "unblock"]);
   assert.deepEqual(menus[1].payload.scope, { type: "chat_member", chat_id: "-1001", user_id: 1 });
   assert.deepEqual(menus[1].payload.commands.map((item) => item.command),
     ["help", "status", "user", "block", "unblock", "close"]);
@@ -509,9 +510,9 @@ test("管理者 /start 更新使用者選單，管理指令仍只對本人可見
   await processUpdate({ message: {
     message_id: 2, chat: { id: 1, type: "private" },
     from: { id: 1, is_bot: false }, text: "/start"
-  } }, { BOT_TOKEN: "test-token", ADMIN_USER_ID: "1", BOT_DB: db });
+  } }, { BOT_TOKEN: "test-token", ADMIN_USER_ID: "1", BOT_DB: db, CAPTCHA_ENABLED: "false" });
   assert.deepEqual(calls.find((call) => call.method === "setMyCommands").payload.commands
-    .map((item) => item.command), ["start", "help", "status", "user", "block", "unblock"]);
+    .map((item) => item.command), ["start", "help", "status", "captcha", "user", "block", "unblock"]);
 }));
 
 test("管理者 /status 顯示近 24 小時更新與 Webhook 待處理數", () => withDatabaseMock(async (db) => {
@@ -526,7 +527,7 @@ test("管理者 /status 顯示近 24 小時更新與 Webhook 待處理數", () =
     VALUES (1, ?, 'done', 1, ?), (2, ?, 'failed', 2, ?), (3, ?, 'discarded', 5, ?),
       (4, ?, 'done', 1, ?)`)
     .bind(now, now, now, now, now, now, now - 2 * 86400, now - 2 * 86400).run();
-  const env = { BOT_TOKEN: "test-token", ADMIN_USER_ID: "1", BOT_DB: db };
+  const env = { BOT_TOKEN: "test-token", ADMIN_USER_ID: "1", BOT_DB: db, CAPTCHA_ENABLED: "false" };
   await processUpdate({ message: {
     message_id: 5, chat: { id: 1, type: "private" },
     from: { id: 1, is_bot: false }, text: "/status"
@@ -567,7 +568,7 @@ test("/forget 需確認並清除路由資料，封鎖者保留最小封鎖紀錄
     await db.prepare(`INSERT INTO media_group_messages(source_chat_id, media_group_id,
       message_id, created_at) VALUES (?, 'album', 11, 1)`).bind(id).run();
   }
-  const env = { BOT_TOKEN: "test-token", ADMIN_USER_ID: "1", BOT_DB: db };
+  const env = { BOT_TOKEN: "test-token", ADMIN_USER_ID: "1", BOT_DB: db, CAPTCHA_ENABLED: "false" };
   await processUpdate({ message: userMessage(1, { text: "/forget" }) }, env);
   assert.equal((await db.prepare("SELECT username FROM users WHERE user_id = '2'").first()).username, "old_name");
   await processUpdate({ message: userMessage(2, { text: "/forget confirm" }) }, env);
@@ -604,13 +605,13 @@ test("使用者歡迎訊息依部署語言，不依 Telegram 使用者語言", (
     await processUpdate({ message: userMessage(sent.length + 1, {
       text: "/start",
       from: { id: 2, is_bot: false, language_code: "zh" }
-    }) }, { BOT_TOKEN: "test-token", ADMIN_USER_ID: "1", BOT_LANGUAGE: language, BOT_DB: db });
+    }) }, { BOT_TOKEN: "test-token", ADMIN_USER_ID: "1", BOT_LANGUAGE: language, BOT_DB: db, CAPTCHA_ENABLED: "false" });
   }
   assert.equal(sent[0], t("ja", "welcome"));
   assert.equal(sent[1], t("en", "welcome"));
   await processUpdate({ message: userMessage(3, { text: "/start" }) }, {
     BOT_TOKEN: "test-token", ADMIN_USER_ID: "1", BOT_LANGUAGE: "en",
-    WELCOME_MESSAGE: "Custom greeting", BOT_DB: db
+    WELCOME_MESSAGE: "Custom greeting", BOT_DB: db, CAPTCHA_ENABLED: "false"
   });
   assert.equal(sent[2], "Custom greeting");
 }));
@@ -628,7 +629,7 @@ test("封鎖與無法轉送提示可由部署設定覆蓋", () => withDatabaseMo
   const env = {
     BOT_TOKEN: "test-token", ADMIN_USER_ID: "1", ADMIN_GROUP_ID: "-1001",
     BLOCKED_MESSAGE: "Contact support", UNSUPPORTED_MESSAGE: "Use plain text",
-    BOT_DB: db
+    BOT_DB: db, CAPTCHA_ENABLED: "false"
   };
   await db.prepare("INSERT INTO users(user_id, blocked, created_at, updated_at) VALUES ('2', 1, 0, 0)").run();
   await processUpdate({ message: userMessage(1, { text: "blocked" }) }, env);
@@ -656,7 +657,7 @@ test("相簿聚合後只呼叫一次 copyMessages 並保存每則映射", () => 
     ADMIN_USER_ID: "1",
     ADMIN_GROUP_ID: "-1001",
     MESSAGE_INTERVAL_SECONDS: "2",
-    BOT_DB: db
+    BOT_DB: db, CAPTCHA_ENABLED: "false"
   };
   await Promise.all([
     processUpdate({ message: userMessage(10, { media_group_id: "album-1", photo: [{}] }) }, env),
@@ -687,7 +688,7 @@ test("逾期的相簿處理 lease 可由重試接手", () => withDatabaseMock(as
     BOT_TOKEN: "test-token",
     ADMIN_USER_ID: "1",
     ADMIN_GROUP_ID: "-1001",
-    BOT_DB: db
+    BOT_DB: db, CAPTCHA_ENABLED: "false"
   };
   const now = Math.floor(Date.now() / 1000);
   await db.prepare("INSERT INTO users(user_id, first_name, created_at, updated_at) VALUES (?, ?, ?, ?)")
@@ -726,7 +727,7 @@ test("同使用者併發訊息只建立一個 Topic", () => withDatabaseMock(asy
     ADMIN_USER_ID: "1",
     ADMIN_GROUP_ID: "-1001",
     MESSAGE_INTERVAL_SECONDS: "0",
-    BOT_DB: db
+    BOT_DB: db, CAPTCHA_ENABLED: "false"
   };
   await Promise.all([
     processUpdate({ message: userMessage(20, { text: "一" }) }, env),
@@ -753,7 +754,7 @@ test("原子節流會拒絕同秒的第二則一般訊息", () => withDatabaseMo
     ADMIN_GROUP_ID: "-1001",
     MESSAGE_INTERVAL_SECONDS: "2",
     RATE_LIMIT_MESSAGE: "Please wait",
-    BOT_DB: db
+    BOT_DB: db, CAPTCHA_ENABLED: "false"
   };
   await Promise.all([
     processUpdate({ message: userMessage(30, { text: "第一則" }) }, env),
@@ -785,7 +786,7 @@ test("永久 Telegram 錯誤會記錄 discarded 並停止重試", () => withData
     BOT_TOKEN: "test-token",
     WEBHOOK_SECRET: "valid-secret",
     ADMIN_USER_ID: "1",
-    BOT_DB: db
+    BOT_DB: db, CAPTCHA_ENABLED: "false"
   });
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { ok: true, discarded: true });
@@ -815,7 +816,7 @@ test("暫時 Telegram 錯誤會記錄 failed 並允許後續重試", () => withD
     BOT_TOKEN: "test-token",
     WEBHOOK_SECRET: "valid-secret",
     ADMIN_USER_ID: "1",
-    BOT_DB: db
+    BOT_DB: db, CAPTCHA_ENABLED: "false"
   };
   const request = () => new Request("https://example.test/webhook", {
     method: "POST",
@@ -863,7 +864,7 @@ test("Telegram 429 會回傳有上限的 Retry-After", () => withDatabaseMock(as
     BOT_TOKEN: "test-token",
     WEBHOOK_SECRET: "valid-secret",
     ADMIN_USER_ID: "1",
-    BOT_DB: db
+    BOT_DB: db, CAPTCHA_ENABLED: "false"
   });
   assert.equal(response.status, 500);
   assert.equal(response.headers.get("retry-after"), "3600");
@@ -888,7 +889,7 @@ test("未知管理指令只回提示，不會誤傳給使用者", () => withData
       from: { id: 1, is_bot: false },
       text: "/blok"
     }
-  }, { BOT_TOKEN: "test-token", ADMIN_USER_ID: "1", ADMIN_GROUP_ID: "-1001", BOT_DB: db });
+  }, { BOT_TOKEN: "test-token", ADMIN_USER_ID: "1", ADMIN_GROUP_ID: "-1001", BOT_DB: db, CAPTCHA_ENABLED: "false" });
   assert.equal(calls.some((call) => call.method === "copyMessage"), false);
   assert.equal(calls.length, 1);
   assert.match(calls[0].payload.text, /未知指令/);
@@ -908,7 +909,7 @@ test("管理者私訊模式會沿用最近對話，不重複產生身分標頭",
     BOT_TOKEN: "test-token",
     ADMIN_USER_ID: "1",
     MESSAGE_INTERVAL_SECONDS: "0",
-    BOT_DB: db
+    BOT_DB: db, CAPTCHA_ENABLED: "false"
   };
   await processUpdate({ message: userMessage(80, { text: "第一則" }) }, env);
   await processUpdate({ message: userMessage(81, { text: "第二則" }) }, env);
@@ -943,7 +944,7 @@ test("相簿處理期間晚到的項目會改為單則補送", () => withDatabas
     ADMIN_USER_ID: "1",
     ADMIN_GROUP_ID: "-1001",
     MESSAGE_INTERVAL_SECONDS: "0",
-    BOT_DB: db
+    BOT_DB: db, CAPTCHA_ENABLED: "false"
   };
   const firstBatch = Promise.all([
     processUpdate({ message: userMessage(90, { media_group_id: "late-album", photo: [{}] }) }, env),
@@ -975,7 +976,7 @@ test("相簿部分複製時會刪除已送出的孤立訊息", () => withDatabas
     ADMIN_USER_ID: "1",
     ADMIN_GROUP_ID: "-1001",
     MESSAGE_INTERVAL_SECONDS: "0",
-    BOT_DB: db
+    BOT_DB: db, CAPTCHA_ENABLED: "false"
   };
   await assert.rejects(Promise.all([
     processUpdate({ message: userMessage(100, { media_group_id: "partial-album", photo: [{}] }) }, env),
@@ -999,7 +1000,7 @@ test("使用者指令不會消耗一般訊息節流額度", () => withDatabaseMo
     ADMIN_USER_ID: "1",
     ADMIN_GROUP_ID: "-1001",
     MESSAGE_INTERVAL_SECONDS: "60",
-    BOT_DB: db
+    BOT_DB: db, CAPTCHA_ENABLED: "false"
   };
   await processUpdate({ message: userMessage(110, { text: "/start" }) }, env);
   await processUpdate({ message: userMessage(111, { text: "緊接著的訊息" }) }, env);
@@ -1021,7 +1022,7 @@ test("可重試錯誤超過上限後會轉為 discarded", () => withDatabaseMock
     BOT_TOKEN: "test-token",
     WEBHOOK_SECRET: "valid-secret",
     ADMIN_USER_ID: "1",
-    BOT_DB: db
+    BOT_DB: db, CAPTCHA_ENABLED: "false"
   };
   const request = () => new Request("https://example.test/webhook", {
     method: "POST",
@@ -1057,7 +1058,7 @@ test("編輯事件早於原訊息時會要求重試並在映射建立後同步",
     ADMIN_USER_ID: "1",
     ADMIN_GROUP_ID: "-1001",
     MESSAGE_INTERVAL_SECONDS: "0",
-    BOT_DB: db
+    BOT_DB: db, CAPTCHA_ENABLED: "false"
   };
   const edited = {
     edited_message: userMessage(130, { text: "編輯後", entities: [] })
@@ -1090,7 +1091,7 @@ test("Topic 資料卡暫時失敗後會沿用原 Topic 補送", () => withDataba
     ADMIN_USER_ID: "1",
     ADMIN_GROUP_ID: "-1001",
     MESSAGE_INTERVAL_SECONDS: "0",
-    BOT_DB: db
+    BOT_DB: db, CAPTCHA_ENABLED: "false"
   };
   const update = { message: userMessage(140, { text: "需要補卡" }) };
   await assert.rejects(processUpdate(update, env), /mock failure/);
@@ -1391,4 +1392,360 @@ test("舊話題已關閉時，未送出提示改私訊管理者，不重新開�
   assert.equal(calls[1].payload.text, t("zh", "replyUnavailable"));
   assert.equal(calls[1].payload.reply_parameters, undefined);
   assert.equal(calls[1].payload.message_thread_id, undefined);
+}));
+
+test("驗證遷移保留既有聯絡者，清除者與新使用者仍須答題", async () => {
+  const db = new TestD1(4);
+  try {
+    db.database.exec("INSERT INTO users(user_id,erased,created_at,updated_at) VALUES ('2',0,1,1),('3',1,1,1)");
+    db.database.exec(readFileSync(new URL("../migrations/0005_contact_verification.sql", import.meta.url), "utf8"));
+    db.database.exec("INSERT INTO users(user_id,created_at,updated_at) VALUES ('4',1,1)");
+    const rows = (await db.prepare("SELECT captcha_verified FROM users ORDER BY user_id").all()).results;
+    assert.deepEqual(rows.map((row) => row.captcha_verified), [1, 0, 0]);
+  } finally { db.close(); }
+});
+
+test("所有算術題都只有簡單整數答案，除法無零除與餘數", () => {
+  const operations = new Set();
+  for (let code = 0; code < 324; code++) {
+    const { question, answer } = captchaQuestion(code);
+    const [, left, op, right] = /^(\d+) ([+−×÷]) (\d+)$/.exec(question);
+    const a = Number(left), b = Number(right);
+    const expected = op === "+" ? a + b : op === "−" ? a - b : op === "×" ? a * b : a / b;
+    assert.equal(answer, expected);
+    assert.ok(Number.isInteger(answer) && answer >= 0 && answer <= 81);
+    if (op === "÷") assert.ok(b > 0 && a % b === 0);
+    operations.add(op);
+  }
+  assert.equal(operations.size, 4);
+});
+
+test("預設攔截文字與媒體；刷訊息不寫個人資料、不反覆出題或建立 Topic", () => withDatabaseMock(async (db) => {
+  const env = { ...auditEnv(db), CAPTCHA_ENABLED: undefined };
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ method: String(url).split("/").pop(), payload: JSON.parse(init.body) });
+    return telegramResponse({ message_id: 700 });
+  };
+  await processUpdate({ message: userMessage(10, { text: "廣告連結" }) }, env);
+  const pending = await db.prepare("SELECT * FROM users WHERE user_id='2'").first();
+  assert.equal(pending.captcha_verified, 0);
+  assert.equal(pending.first_name, "");
+  assert.equal(pending.username, null);
+  assert.equal(pending.topic_id, null);
+  let writes = 0;
+  const prepare = db.prepare.bind(db);
+  db.prepare = (sql) => {
+    const statement = prepare(sql), run = statement.runSync.bind(statement);
+    statement.runSync = () => { writes++; return run(); };
+    return statement;
+  };
+  for (let id = 11; id <= 60; id++) {
+    await processUpdate({ message: userMessage(id, id % 2 ? { text: "廣告" }
+      : { photo: [{}], media_group_id: "spam" }) }, env);
+  }
+  await processUpdate({ edited_message: userMessage(10, { text: "改成廣告" }) }, env);
+  assert.equal(writes, 0);
+  assert.deepEqual(calls.map((call) => call.method), ["sendMessage"]);
+  assert.ok(calls[0].payload.text.includes(t("zh", "captchaPrompt").split("{question}")[0]));
+  for (const table of ["message_map", "media_groups", "media_group_messages", "rate_admissions"]) {
+    assert.equal((await db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first()).n, 0);
+  }
+}));
+
+test("三語在兩種模式答題後可正常收發，但答案、舊廣告和它們的編輯永不轉送", async () => {
+  for (const topic of [true, false]) for (const language of ["zh", "ja", "en"]) {
+    await withDatabaseMock(async (db) => {
+      const env = { ...auditEnv(db, topic), CAPTCHA_ENABLED: undefined, BOT_LANGUAGE: language };
+      const calls = [];
+      globalThis.fetch = async (url, init) => {
+        const method = String(url).split("/").pop();
+        calls.push({ method, payload: JSON.parse(init.body) });
+        return telegramResponse(method === "createForumTopic" ? { message_thread_id: 72 } : { message_id: 700 });
+      };
+      await processUpdate({ message: userMessage(10, { text: "/start" }) }, env);
+      assert.ok(calls[0].payload.text.startsWith(t(language, "captchaPrompt").split("{question}")[0]));
+      await db.prepare("UPDATE users SET captcha_code=0 WHERE user_id='2'").run();
+      await processUpdate({ message: userMessage(12, { text: "２" }) }, env);
+      assert.equal(calls.at(-1).payload.text, t(language, "captchaPassed"));
+      assert.equal((await db.prepare("SELECT captcha_verified FROM users WHERE user_id='2'").first()).captcha_verified, 1);
+      for (const id of [10, 11, 12]) {
+        await processUpdate({ message: userMessage(id, { text: "舊內容" }) }, env);
+        await processUpdate({ edited_message: userMessage(id, { text: "編輯舊內容" }) }, env);
+      }
+      assert.equal(calls.some((call) => call.method === "copyMessage"), false);
+      await processUpdate({ message: userMessage(20, { text: "真正聯絡" }) }, env);
+      assert.deepEqual(calls.filter((call) => call.method === "copyMessage")
+        .map((call) => call.payload.message_id), [20]);
+      await processUpdate({ edited_message: userMessage(20, { text: "修改聯絡內容" }) }, env);
+      assert.equal(calls.at(-1).method, "editMessageText");
+      await processUpdate({ message: adminMessage(30, "回覆", topic
+        ? { chat: { id: -1001, type: "supergroup", is_forum: true }, message_thread_id: 72 }
+        : { reply_to_message: { message_id: 700 } }) }, env);
+      assert.equal(calls.at(-1).method, "copyMessage");
+      assert.equal(calls.at(-1).payload.chat_id, "2");
+    });
+  }
+});
+
+test("三次錯誤後冷卻，重複更新不重扣次數；冷卻內不讀寫路由或發提示", () => withDatabaseMock(async (db) => {
+  let now = 2_000_000_000;
+  Date.now = () => now * 1000;
+  const env = { ...auditEnv(db), CAPTCHA_ENABLED: undefined };
+  let notices = 0;
+  globalThis.fetch = async () => { notices++; return telegramResponse({ message_id: 700 }); };
+  await processUpdate({ message: userMessage(10, { text: "/start" }) }, env);
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    now += 5;
+    const request = () => auditRequest(9000 + attempt, userMessage(10 + attempt, { text: "999" }));
+    assert.equal((await worker.fetch(request(), env)).status, 200);
+    assert.equal((await worker.fetch(request(), env)).status, 200);
+    assert.equal((await db.prepare("SELECT captcha_attempts FROM users").first()).captcha_attempts, attempt);
+  }
+  assert.equal(notices, 4);
+  const locked = await db.prepare("SELECT * FROM users").first();
+  assert.equal(locked.captcha_until, now + 900);
+  now += 899;
+  await processUpdate({ message: userMessage(20, { text: String(captchaQuestion(locked.captcha_code).answer) }) }, env);
+  await processUpdate({ message: userMessage(21, { text: "/start" }) }, env);
+  assert.equal(notices, 4);
+  assert.deepEqual(await db.prepare("SELECT * FROM users").first(), locked);
+  now++;
+  await processUpdate({ message: userMessage(22, { text: "/start" }) }, env);
+  assert.equal(notices, 5);
+  assert.equal((await db.prepare("SELECT captcha_attempts FROM users").first()).captcha_attempts, 0);
+}));
+
+test("題目五分鐘後更新；/start 提醒不重置期限或錯誤次數", () => withDatabaseMock(async (db) => {
+  let now = 2_000_000_000;
+  Date.now = () => now * 1000;
+  const env = { ...auditEnv(db), CAPTCHA_ENABLED: undefined };
+  globalThis.fetch = async () => telegramResponse({ message_id: 700 });
+  await processUpdate({ message: userMessage(10, { text: "/start" }) }, env);
+  now += 5;
+  await processUpdate({ message: userMessage(11, { text: "999" }) }, env);
+  now += 60;
+  await processUpdate({ message: userMessage(12, { text: "/start" }) }, env);
+  let user = await db.prepare("SELECT * FROM users").first();
+  assert.equal(user.captcha_attempts, 1);
+  assert.equal(user.captcha_until, 2_000_000_300);
+  now = user.captcha_until;
+  await processUpdate({ message: userMessage(13, { text: String(captchaQuestion(user.captcha_code).answer) }) }, env);
+  user = await db.prepare("SELECT * FROM users").first();
+  assert.equal(user.captcha_verified, 0);
+  assert.equal(user.captcha_until, now + 300);
+  assert.equal(user.captcha_attempts, 0);
+}));
+
+test("Telegram 暫時失敗後可補送同一道題與通過通知，絕不把答案變成一般轉送", () => withDatabaseMock(async (db) => {
+  const env = { ...auditEnv(db), CAPTCHA_ENABLED: undefined };
+  let fail = true;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ method: String(url).split("/").pop(), payload: JSON.parse(init.body) });
+    if (fail) { fail = false; return telegramResponse(false, 500); }
+    return telegramResponse({ message_id: 700 });
+  };
+  const first = () => auditRequest(9100, userMessage(10, { text: "廣告" }));
+  assert.equal((await worker.fetch(first(), env)).status, 500);
+  const code = (await db.prepare("SELECT captcha_code FROM users").first()).captcha_code;
+  assert.equal((await worker.fetch(first(), env)).status, 200);
+  assert.equal((await db.prepare("SELECT captcha_code FROM users").first()).captcha_code, code);
+  assert.equal(calls[0].payload.text, calls[1].payload.text);
+  fail = true;
+  const answer = () => auditRequest(9101, userMessage(11, { text: String(captchaQuestion(code).answer) }));
+  assert.equal((await worker.fetch(answer(), env)).status, 500);
+  assert.equal((await worker.fetch(answer(), env)).status, 200);
+  assert.equal(calls.at(-1).payload.text, t("zh", "captchaPassed"));
+  assert.equal(calls.some((call) => call.method !== "sendMessage"), false);
+}));
+
+test("答題併發清除或封鎖時不能通過驗證，也不能由舊更新恢復資料", async () => {
+  for (const erase of [true, false]) await withDatabaseMock(async (db) => {
+    const env = { ...auditEnv(db), CAPTCHA_ENABLED: undefined };
+    globalThis.fetch = async () => telegramResponse({ message_id: 700 });
+    await processUpdate({ message: userMessage(10, { text: "/start" }) }, env);
+    const user = await db.prepare("SELECT * FROM users").first();
+    const prepare = db.prepare.bind(db);
+    db.prepare = (sql) => {
+      const statement = prepare(sql);
+      if (/UPDATE users SET captcha_verified = 1/.test(sql)) {
+        const run = statement.run.bind(statement);
+        statement.run = async () => {
+          if (erase) await processUpdate({ message: userMessage(20, { text: "/forget confirm" }) }, env);
+          else db.database.exec("UPDATE users SET blocked=1 WHERE user_id='2'");
+          return run();
+        };
+      }
+      return statement;
+    };
+    await processUpdate({ message: userMessage(11, { text: String(captchaQuestion(user.captcha_code).answer) }) }, env);
+    const current = await prepare("SELECT * FROM users").first();
+    assert.equal(current.captcha_verified, 0);
+    assert.equal(erase ? current.erased : current.blocked, 1);
+    await processUpdate({ message: userMessage(12, { text: "延遲訊息" }) }, env);
+    assert.equal((await prepare("SELECT * FROM users").first()).captcha_verified, 0);
+  });
+});
+
+test("驗證關閉與已通過驗證時的正常轉送 SQL 相同，無額外讀寫", () => withDatabaseMock(async (db) => {
+  seedAuditUser(db);
+  db.database.exec("UPDATE users SET captcha_verified=1 WHERE user_id='2'");
+  globalThis.fetch = async () => telegramResponse({ message_id: 700 });
+  const env = auditEnv(db), queries = [];
+  const prepare = db.prepare.bind(db);
+  db.prepare = (sql) => { queries.push(sql); return prepare(sql); };
+  Date.now = () => 2_000_000_000_000;
+  await processUpdate({ message: userMessage(10, { text: "正常聯絡" }) }, env);
+  const before = [...queries];
+  db.database.exec("DELETE FROM message_map; DELETE FROM rate_admissions; UPDATE users SET last_message_at=0, last_rate_key=NULL");
+  queries.length = 0;
+  await processUpdate({ message: userMessage(11, { text: "正常聯絡" }) }, { ...env, CAPTCHA_ENABLED: undefined });
+  assert.deepEqual(queries, before);
+}));
+
+test("每日原有清理會移除七天未完成驗證者，保留近期、已通過與封鎖者", () => withDatabaseMock(async (db) => {
+  const now = Math.floor(Date.now() / 1000), old = now - 8 * 86400;
+  db.database.exec(`INSERT INTO users(user_id,captcha_verified,blocked,created_at,updated_at) VALUES
+    ('2',0,0,${old},${old}),('3',0,0,${now},${now}),('4',1,0,${old},${old}),('5',0,1,${old},${old})`);
+  let cleanup;
+  await worker.scheduled({}, auditEnv(db), { waitUntil(promise) { cleanup = promise; } });
+  await cleanup;
+  assert.deepEqual((await db.prepare("SELECT user_id FROM users ORDER BY user_id").all()).results
+    .map((row) => row.user_id), ["3", "4", "5"]);
+}));
+
+test("併發首次訊息只出一題；併發錯誤不重扣驗證次數", () => withDatabaseMock(async (db) => {
+  let now = 2_000_000_000;
+  Date.now = () => now * 1000;
+  const env = { ...auditEnv(db), CAPTCHA_ENABLED: undefined };
+  let notices = 0;
+  globalThis.fetch = async () => { notices++; return telegramResponse({ message_id: 700 }); };
+  await Promise.all([10, 11, 12].map((id) => processUpdate({ message: userMessage(id, { text: "廣告" }) }, env)));
+  assert.equal(notices, 1);
+  now += 5;
+  await Promise.all([20, 21, 22].map((id) => processUpdate({ message: userMessage(id, { text: "999" }) }, env)));
+  assert.equal(notices, 2);
+  assert.equal((await db.prepare("SELECT captcha_attempts FROM users").first()).captcha_attempts, 1);
+}));
+
+test("驗證前 /id 不建資料，清除後舊答案無效且新聯絡必須重新驗證", () => withDatabaseMock(async (db) => {
+  const env = { ...auditEnv(db), CAPTCHA_ENABLED: undefined };
+  globalThis.fetch = async () => telegramResponse({ message_id: 700 });
+  await processUpdate({ message: userMessage(1, { text: "/id" }) }, env);
+  assert.equal((await db.prepare("SELECT COUNT(*) n FROM users").first()).n, 0);
+  await processUpdate({ message: userMessage(10, { text: "/start" }) }, env);
+  const answer = String(captchaQuestion((await db.prepare("SELECT captcha_code FROM users").first()).captcha_code).answer);
+  await processUpdate({ message: userMessage(11, { text: answer }) }, env);
+  await processUpdate({ message: userMessage(20, { text: "/forget confirm" }) }, env);
+  await processUpdate({ message: userMessage(11, { text: answer }) }, env);
+  let user = await db.prepare("SELECT * FROM users").first();
+  assert.equal(user.captcha_verified, 0);
+  assert.equal(user.captcha_code, null);
+  assert.equal(user.erased, 1);
+  await processUpdate({ message: userMessage(30, { text: "再次聯絡" }) }, env);
+  user = await db.prepare("SELECT * FROM users").first();
+  assert.equal(user.captcha_verified, 0);
+  assert.equal(user.first_name, "");
+  assert.notEqual(user.captcha_code, null);
+  assert.equal(user.topic_id, null);
+}));
+
+test("管理者私訊開關立即生效，跨請求保留並優先於部署預設，關閉不解除封鎖", () => withDatabaseMock(async (db) => {
+  const env = auditEnv(db, false), calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ method: String(url).split("/").pop(), payload: JSON.parse(init.body) });
+    return telegramResponse({ message_id: 700 });
+  };
+  await processUpdate({ message: adminMessage(10, "/captcha") }, env);
+  assert.ok(calls.at(-1).payload.text.startsWith(t("zh", "captchaDisabled")));
+  await processUpdate({ message: adminMessage(11, "/captcha on") }, env);
+  await processUpdate({ message: userMessage(20, { text: "待驗證" }) }, { ...env });
+  assert.equal(calls.some((call) => call.method === "copyMessage"), false);
+  await processUpdate({ message: adminMessage(12, "/captcha off") }, env);
+  await processUpdate({ message: userMessage(21, { text: "可直接聯絡" }) }, { ...env, CAPTCHA_ENABLED: "true" });
+  assert.equal(calls.at(-1).method, "copyMessage");
+  await db.prepare("UPDATE users SET blocked=1 WHERE user_id='2'").run();
+  const copies = calls.filter((call) => call.method === "copyMessage").length;
+  await processUpdate({ message: userMessage(22, { text: "仍被封鎖" }) }, env);
+  assert.equal(calls.filter((call) => call.method === "copyMessage").length, copies);
+  await processUpdate({ message: adminMessage(13, "/captcha on") }, env);
+  await processUpdate({ message: userMessage(30, { chat: { id: 3, type: "private" },
+    from: { id: 3, is_bot: false }, text: "新聯絡者" }) }, { ...env });
+  assert.ok(calls.at(-1).payload.text.startsWith(t("zh", "captchaPrompt").split("{question}")[0]));
+  assert.equal((await db.prepare("SELECT captcha_enabled FROM bot_settings").first()).captcha_enabled, 1);
+}));
+
+test("三語管理選單包含驗證開關，狀態與無效參數只讀取設定", async () => {
+  for (const language of ["zh", "ja", "en"]) await withDatabaseMock(async (db) => {
+    const env = { ...auditEnv(db), BOT_LANGUAGE: language }, calls = [];
+    globalThis.fetch = async (url, init) => {
+      calls.push({ method: String(url).split("/").pop(), payload: JSON.parse(init.body) });
+      return telegramResponse(true);
+    };
+    await processUpdate({ message: adminMessage(10, "/start") }, env);
+    const menus = calls.filter((call) => call.method === "setMyCommands");
+    assert.deepEqual(menus.filter((call) => call.payload.commands.some((item) => item.command === "captcha"))
+      .map((call) => call.payload.scope), [{ type: "chat", chat_id: "1" }]);
+    for (const text of ["/captcha", "/captcha invalid", "/captcha on extra"]) {
+      await processUpdate({ message: adminMessage(11, text) }, env);
+      assert.equal(calls.at(-1).payload.text, t(language, "captchaDisabled") + "\n\n" + t(language, "captchaControls"));
+    }
+    const row = await db.prepare("SELECT * FROM bot_settings").first();
+    assert.equal(row.captcha_enabled, null);
+    assert.equal(row.captcha_message_id, 0);
+    assert.equal((await db.prepare("SELECT COUNT(*) n FROM users").first()).n, 0);
+  });
+});
+
+test("使用者、群組與編輯更新不能修改開關，其他 Bot 的命令也不執行", () => withDatabaseMock(async (db) => {
+  const env = { ...auditEnv(db), CAPTCHA_ENABLED: undefined, BOT_TOKEN: "captcha-scope-test" };
+  globalThis.fetch = async (url) => telegramResponse(String(url).endsWith("/getMe")
+    ? { username: "ThisRelayBot" } : { message_id: 700 });
+  await processUpdate({ message: userMessage(10, { text: "/captcha off" }) }, env);
+  await processUpdate({ message: adminMessage(11, "/captcha off", {
+    chat: { id: -1001, type: "supergroup", is_forum: true }, message_thread_id: 72
+  }) }, env);
+  await processUpdate({ edited_message: adminMessage(12, "/captcha off") }, env);
+  await processUpdate({ message: adminMessage(13, "/captcha@AnotherBot off") }, env);
+  const setting = await db.prepare("SELECT * FROM bot_settings").first();
+  assert.equal(setting.captcha_enabled, null);
+  assert.equal(setting.captcha_message_id, 0);
+  await processUpdate({ message: adminMessage(14, "/captcha@ThisRelayBot OFF") }, env);
+  assert.equal((await db.prepare("SELECT captcha_enabled FROM bot_settings").first()).captcha_enabled, 0);
+}));
+
+test("舊開關命令通知失敗後重試，不能覆蓋較新設定", () => withDatabaseMock(async (db) => {
+  const env = auditEnv(db);
+  let fail = true;
+  const texts = [];
+  globalThis.fetch = async (_url, init) => {
+    texts.push(JSON.parse(init.body).text);
+    if (fail) { fail = false; return telegramResponse(false, 500); }
+    return telegramResponse({ message_id: 700 });
+  };
+  const old = () => auditRequest(9200, adminMessage(10, "/captcha off"));
+  assert.equal((await worker.fetch(old(), env)).status, 500);
+  await processUpdate({ message: adminMessage(11, "/captcha on") }, env);
+  assert.equal((await worker.fetch(old(), env)).status, 200);
+  const row = await db.prepare("SELECT * FROM bot_settings").first();
+  assert.equal(row.captcha_enabled, 1);
+  assert.equal(row.captcha_message_id, 11);
+  assert.ok(texts.at(-1).startsWith(t("zh", "captchaEnabled")));
+}));
+
+test("開關寫入暫時失敗可重試，設定列遺失時 ready 與新轉送都關閉通行", () => withDatabaseMock(async (db) => {
+  const env = auditEnv(db);
+  let sends = 0;
+  globalThis.fetch = async () => { sends++; return telegramResponse(true); };
+  injectWriteFailure(db, (sql) => /UPDATE bot_settings SET captcha_enabled/.test(sql));
+  const request = () => auditRequest(9201, adminMessage(10, "/captcha on"));
+  assert.equal((await worker.fetch(request(), env)).status, 500);
+  assert.equal((await worker.fetch(request(), env)).status, 200);
+  assert.equal(sends, 1);
+  await db.prepare("DELETE FROM bot_settings").run();
+  assert.equal((await worker.fetch(new Request("https://example.test/ready"), env)).status, 503);
+  assert.equal((await worker.fetch(auditRequest(9202, userMessage(20, { text: "不應轉送" })), env)).status, 500);
+  assert.equal(sends, 1);
+  assert.equal((await db.prepare("SELECT COUNT(*) n FROM users").first()).n, 0);
 }));

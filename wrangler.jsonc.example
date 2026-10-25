@@ -6,7 +6,8 @@
   "workers_dev": true,
   "keep_vars": true,
   "vars": {
-    "BOT_LANGUAGE": "zh"
+    "BOT_LANGUAGE": "zh",
+    "CAPTCHA_ENABLED": "true"
   },
   "d1_databases": [
     {
