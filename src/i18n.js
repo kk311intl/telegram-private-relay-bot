@@ -4,7 +4,7 @@ const messages = {
     adminReadyDirect: "管理者私訊模式。\n請回覆 Bot 轉來的使用者訊息；傳送 /help 查看指令。",
     blockedNotice: "目前無法接收你的訊息。",
     welcome: "請在此傳送訊息。管理者可透過 Bot 回覆。\n傳送 /help 查看使用說明。",
-    userHelp: `直接傳送文字或一般媒體，管理者可透過 Bot 回覆。首次聯絡可能需要算術驗證，通過後請重新傳送內容。
+    userHelp: `直接傳送文字或一般媒體，管理者可透過 Bot 回覆。首次聯絡可能需要算術驗證，以攔截自動化廣告；通過後會自動轉送第一則訊息。
 
 /start — 查看歡迎訊息
 /help — 查看使用說明
@@ -14,11 +14,12 @@ const messages = {
     userCommand_help: "查看使用說明",
     userCommand_id: "查看自己的 User ID",
     userCommand_forget: "查看資料清除說明",
-    captchaPrompt: "首次聯絡請先驗證：{question} = ?\n請在 5 分鐘內只回覆數字；連錯 3 次須等 15 分鐘。\n驗證前的訊息未轉送，通過後請重新傳送內容。",
+    captchaPrompt: "為攔截自動化廣告，首次聯絡需先驗證：{question} = ?\n請在 5 分鐘內只回覆數字；連錯 3 次須等 15 分鐘。\n通過後會自動將第一則訊息（或第一組相簿）送給管理者，不必重送。",
     captchaWrong: "答案不正確，請只回覆數字：{question} = ?\n連錯 3 次須等 15 分鐘；原題有效時間不變。",
-    captchaLocked: "錯誤次數已達上限，請等 15 分鐘後傳送 /start 重新驗證。訊息未轉送。",
-    captchaExpired: "驗證已到期，請傳送 /start 取得新題目。訊息未轉送。",
-    captchaPassed: "驗證通過。請重新傳送要聯絡管理者的內容；先前的訊息與答案不會轉送。",
+    captchaLocked: "錯誤次數已達上限，訊息未轉送。請等 15 分鐘後重新傳送聯絡內容，再完成驗證。",
+    captchaExpired: "驗證已到期，訊息未轉送。請重新傳送聯絡內容，取得新題目。",
+    captchaPassed: "驗證通過。現在可以直接聯絡管理者。",
+    captchaPendingLost: "第一則訊息的暫存已失效，請重新傳送聯絡內容。",
     captchaEnabled: "首次聯絡驗證：已開啟",
     captchaDisabled: "首次聯絡驗證：已關閉",
     captchaControls: "/captcha on — 開啟\n/captcha off — 關閉\n僅管理者私訊可修改，設定會保留。已驗證者不受影響，封鎖仍有效。",
@@ -120,7 +121,7 @@ const messages = {
     adminReadyDirect: "管理者個別チャットモードです。\n転送されたメッセージに返信してください。/help でコマンドを確認できます。",
     blockedNotice: "現在、メッセージを受け付けられません。",
     welcome: "ここにメッセージを送ってください。管理者はこのチャットに返信できます。\n/help で使い方を確認できます。",
-    userHelp: `テキストや一般的なメディアを送信すると、管理者が Bot を通して返信できます。初回は計算による確認が必要な場合があります。確認後に内容を送り直してください。
+    userHelp: `テキストや一般的なメディアを送信すると、管理者が Bot を通して返信できます。自動広告を防ぐため、初回は計算による確認が必要な場合があります。確認後、最初のメッセージを自動転送します。
 
 /start — 開始時のメッセージを表示
 /help — 使い方を表示
@@ -130,11 +131,12 @@ const messages = {
     userCommand_help: "使い方を表示",
     userCommand_id: "自分の User ID を表示",
     userCommand_forget: "データ消去の説明を表示",
-    captchaPrompt: "初めての連絡では確認が必要です：{question} = ?\n5分以内に数字だけを送ってください。3回間違えると15分間待つ必要があります。\n確認前のメッセージは転送しません。確認後に内容を送り直してください。",
+    captchaPrompt: "自動広告を防ぐため、初めての連絡では確認が必要です：{question} = ?\n5分以内に数字だけを送ってください。3回間違えると15分間待つ必要があります。\n確認後、最初のメッセージ（または最初のアルバム）を自動転送します。送り直す必要はありません。",
     captchaWrong: "答えが違います。数字だけを送ってください：{question} = ?\n3回間違えると15分間待つ必要があります。有効期限は延長されません。",
-    captchaLocked: "間違いの上限に達しました。15分後に /start を送って再確認してください。メッセージは転送していません。",
-    captchaExpired: "確認の期限が切れました。/start で新しい問題を取得してください。メッセージは転送していません。",
-    captchaPassed: "確認できました。管理者に連絡したい内容を送り直してください。確認前のメッセージや答えは転送しません。",
+    captchaLocked: "間違いの上限に達しました。メッセージは転送していません。15分後に連絡したい内容を送り直し、確認してください。",
+    captchaExpired: "確認の期限が切れました。メッセージは転送していません。連絡したい内容を送り直すと、新しい問題が表示されます。",
+    captchaPassed: "確認できました。管理者に直接連絡できます。",
+    captchaPendingLost: "最初のメッセージの一時記録が失効しました。連絡したい内容を送り直してください。",
     captchaEnabled: "初回の計算確認：有効",
     captchaDisabled: "初回の計算確認：無効",
     captchaControls: "/captcha on — 有効にする\n/captcha off — 無効にする\n管理者との個別チャットでのみ変更でき、設定は保持されます。確認済みユーザーとブロック状態には影響しません。",
@@ -236,7 +238,7 @@ Bot との個別チャット：
     adminReadyDirect: "Admin private-chat mode.\nReply to a message relayed by the bot. Send /help for commands.",
     blockedNotice: "This bot is not accepting your messages right now.",
     welcome: "Send a message here. The admin can reply in this chat.\nSend /help for instructions.",
-    userHelp: `Send text or standard media here. The admin can reply through the bot. First contact may require an arithmetic check; resend your message after passing it.
+    userHelp: `Send text or standard media here. The admin can reply through the bot. First contact may require an arithmetic check to reduce automated ads. Your first message is relayed automatically after passing.
 
 /start — Show the welcome message
 /help — Show instructions
@@ -246,11 +248,12 @@ Bot との個別チャット：
     userCommand_help: "Show instructions",
     userCommand_id: "Show your User ID",
     userCommand_forget: "Show erasure instructions",
-    captchaPrompt: "Please verify before your first contact: {question} = ?\nReply with digits only within 5 minutes. Three wrong answers require a 15-minute wait.\nMessages sent before verification are not relayed. Resend your message after passing.",
+    captchaPrompt: "To reduce automated ads, please verify your first contact: {question} = ?\nReply with digits only within 5 minutes. Three wrong answers require a 15-minute wait.\nYour first message (or first album) is relayed automatically after passing. No need to resend it.",
     captchaWrong: "Incorrect answer. Reply with digits only: {question} = ?\nThree wrong answers require a 15-minute wait. The original expiry still applies.",
-    captchaLocked: "Too many wrong answers. Wait 15 minutes, then send /start for a new check. Your messages were not relayed.",
-    captchaExpired: "The check has expired. Send /start for a new question. Your messages were not relayed.",
-    captchaPassed: "Verification passed. Resend the message you want the admin to receive. Earlier messages and your answer are not relayed.",
+    captchaLocked: "Too many wrong answers. Your message was not relayed. Wait 15 minutes, then send your contact message again for a new check.",
+    captchaExpired: "The check has expired. Your message was not relayed. Send your contact message again for a new question.",
+    captchaPassed: "Verification passed. You can now contact the admin directly.",
+    captchaPendingLost: "The reference to your first message has expired. Please send your contact message again.",
     captchaEnabled: "First-contact check: enabled",
     captchaDisabled: "First-contact check: disabled",
     captchaControls: "/captcha on — Enable\n/captcha off — Disable\nOnly the admin can change this in their private chat. The setting persists. Verified contacts and blocks are unaffected.",

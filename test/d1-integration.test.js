@@ -478,11 +478,11 @@ test("撤回失敗時告知發送者並停止同一更新自動重送", () => wi
 }));
 
 test("ready 拒絕缺少新 migration 的 D1，套用後恢復", async () => {
-  const db = new TestD1(4);
+  const db = new TestD1(5);
   try {
     const request = () => new Request("https://example.com/ready");
     assert.equal((await worker.fetch(request(), auditEnv(db))).status, 503);
-    db.database.exec(readFileSync(new URL("../migrations/0005_contact_verification.sql", import.meta.url), "utf8"));
+    db.database.exec(readFileSync(new URL("../migrations/0006_verification_pending_message.sql", import.meta.url), "utf8"));
     assert.equal((await worker.fetch(request(), auditEnv(db))).status, 200);
   } finally { db.close(); }
 });
@@ -1448,32 +1448,44 @@ test("預設攔截文字與媒體；刷訊息不寫個人資料、不反覆出�
   assert.equal(writes, 0);
   assert.deepEqual(calls.map((call) => call.method), ["sendMessage"]);
   assert.ok(calls[0].payload.text.includes(t("zh", "captchaPrompt").split("{question}")[0]));
-  for (const table of ["message_map", "media_groups", "media_group_messages", "rate_admissions"]) {
+  for (const table of ["message_map", "rate_admissions"]) {
     assert.equal((await db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first()).n, 0);
   }
+  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM media_groups WHERE state='initializing'").first()).n, 1);
+  assert.equal((await db.prepare("SELECT message_id FROM media_group_messages").first()).message_id, 10);
 }));
 
-test("三語在兩種模式答題後可正常收發，但答案、舊廣告和它們的編輯永不轉送", async () => {
+test("三語兩種模式保留歡迎文字，首則訊息答題後自動轉送，答案與其他舊內容不轉送", async () => {
   for (const topic of [true, false]) for (const language of ["zh", "ja", "en"]) {
     await withDatabaseMock(async (db) => {
-      const env = { ...auditEnv(db, topic), CAPTCHA_ENABLED: undefined, BOT_LANGUAGE: language };
+      const env = { ...auditEnv(db, topic), CAPTCHA_ENABLED: undefined, BOT_LANGUAGE: language,
+        ...(language === "zh" ? { WELCOME_MESSAGE: "原有自訂歡迎" } : {}) };
       const calls = [];
       globalThis.fetch = async (url, init) => {
         const method = String(url).split("/").pop();
         calls.push({ method, payload: JSON.parse(init.body) });
+        if (method === "copyMessages") return telegramResponse([{ message_id: 700 }]);
         return telegramResponse(method === "createForumTopic" ? { message_thread_id: 72 } : { message_id: 700 });
       };
       await processUpdate({ message: userMessage(10, { text: "/start" }) }, env);
-      assert.ok(calls[0].payload.text.startsWith(t(language, "captchaPrompt").split("{question}")[0]));
+      assert.equal(calls[0].payload.text, env.WELCOME_MESSAGE || t(language, "welcome"));
+      assert.equal((await db.prepare("SELECT COUNT(*) n FROM users").first()).n, 0);
+      await processUpdate({ message: userMessage(11, { text: "第一則聯絡內容" }) }, env);
+      assert.ok(calls[1].payload.text.startsWith(t(language, "captchaPrompt").split("{question}")[0]));
       await db.prepare("UPDATE users SET captcha_code=0 WHERE user_id='2'").run();
       await processUpdate({ message: userMessage(12, { text: "２" }) }, env);
       assert.equal(calls.at(-1).payload.text, t(language, "captchaPassed"));
       assert.equal((await db.prepare("SELECT captcha_verified FROM users WHERE user_id='2'").first()).captcha_verified, 1);
-      for (const id of [10, 11, 12]) {
+      assert.deepEqual(calls.filter((call) => call.method === "copyMessages").map((call) => call.payload.message_ids), [[11]]);
+      for (const id of [9, 10, 12]) {
         await processUpdate({ message: userMessage(id, { text: "舊內容" }) }, env);
         await processUpdate({ edited_message: userMessage(id, { text: "編輯舊內容" }) }, env);
       }
       assert.equal(calls.some((call) => call.method === "copyMessage"), false);
+      await processUpdate({ message: userMessage(11, { text: "重複的原訊息" }) }, env);
+      assert.equal(calls.filter((call) => call.method === "copyMessages").length, 1);
+      await processUpdate({ edited_message: userMessage(11, { text: "編輯第一則內容" }) }, env);
+      assert.equal(calls.at(-1).method, "editMessageText");
       await processUpdate({ message: userMessage(20, { text: "真正聯絡" }) }, env);
       assert.deepEqual(calls.filter((call) => call.method === "copyMessage")
         .map((call) => call.payload.message_id), [20]);
@@ -1494,7 +1506,7 @@ test("三次錯誤後冷卻，重複更新不重扣次數；冷卻內不讀寫�
   const env = { ...auditEnv(db), CAPTCHA_ENABLED: undefined };
   let notices = 0;
   globalThis.fetch = async () => { notices++; return telegramResponse({ message_id: 700 }); };
-  await processUpdate({ message: userMessage(10, { text: "/start" }) }, env);
+  await processUpdate({ message: userMessage(10, { text: "首次聯絡" }) }, env);
   for (let attempt = 1; attempt <= 3; attempt++) {
     now += 5;
     const request = () => auditRequest(9000 + attempt, userMessage(10 + attempt, { text: "999" }));
@@ -1507,21 +1519,21 @@ test("三次錯誤後冷卻，重複更新不重扣次數；冷卻內不讀寫�
   assert.equal(locked.captcha_until, now + 900);
   now += 899;
   await processUpdate({ message: userMessage(20, { text: String(captchaQuestion(locked.captcha_code).answer) }) }, env);
-  await processUpdate({ message: userMessage(21, { text: "/start" }) }, env);
+  await processUpdate({ message: userMessage(21, { text: "重複廣告" }) }, env);
   assert.equal(notices, 4);
   assert.deepEqual(await db.prepare("SELECT * FROM users").first(), locked);
   now++;
-  await processUpdate({ message: userMessage(22, { text: "/start" }) }, env);
+  await processUpdate({ message: userMessage(22, { text: "重新聯絡" }) }, env);
   assert.equal(notices, 5);
   assert.equal((await db.prepare("SELECT captcha_attempts FROM users").first()).captcha_attempts, 0);
 }));
 
-test("題目五分鐘後更新；/start 提醒不重置期限或錯誤次數", () => withDatabaseMock(async (db) => {
+test("過期答案不暫存或轉送；/start 只顯示歡迎且不重置期限或錯誤次數", () => withDatabaseMock(async (db) => {
   let now = 2_000_000_000;
   Date.now = () => now * 1000;
   const env = { ...auditEnv(db), CAPTCHA_ENABLED: undefined };
   globalThis.fetch = async () => telegramResponse({ message_id: 700 });
-  await processUpdate({ message: userMessage(10, { text: "/start" }) }, env);
+  await processUpdate({ message: userMessage(10, { text: "首次聯絡" }) }, env);
   now += 5;
   await processUpdate({ message: userMessage(11, { text: "999" }) }, env);
   now += 60;
@@ -1533,17 +1545,30 @@ test("題目五分鐘後更新；/start 提醒不重置期限或錯誤次數", (
   await processUpdate({ message: userMessage(13, { text: String(captchaQuestion(user.captcha_code).answer) }) }, env);
   user = await db.prepare("SELECT * FROM users").first();
   assert.equal(user.captcha_verified, 0);
-  assert.equal(user.captcha_until, now + 300);
+  assert.equal(user.captcha_until, 0);
+  assert.equal(user.captcha_pending_group, null);
   assert.equal(user.captcha_attempts, 0);
+  await processUpdate({ message: userMessage(14, { text: "重新傳送聯絡內容" }) }, env);
+  user = await db.prepare("SELECT * FROM users").first();
+  assert.equal(user.captcha_until, now + 300);
+  assert.deepEqual((await db.prepare("SELECT message_id FROM media_group_messages").all()).results.map((row) => row.message_id), [14]);
 }));
 
 test("Telegram 暫時失敗後可補送同一道題與通過通知，絕不把答案變成一般轉送", () => withDatabaseMock(async (db) => {
   const env = { ...auditEnv(db), CAPTCHA_ENABLED: undefined };
   let fail = true;
+  let failPassed = false;
   const calls = [];
   globalThis.fetch = async (url, init) => {
-    calls.push({ method: String(url).split("/").pop(), payload: JSON.parse(init.body) });
+    const method = String(url).split("/").pop(), payload = JSON.parse(init.body);
+    calls.push({ method, payload });
     if (fail) { fail = false; return telegramResponse(false, 500); }
+    if (failPassed && payload.text === t("zh", "captchaPassed")) {
+      failPassed = false;
+      return telegramResponse(false, 500);
+    }
+    if (method === "createForumTopic") return telegramResponse({ message_thread_id: 72 });
+    if (method === "copyMessages") return telegramResponse([{ message_id: 700 }]);
     return telegramResponse({ message_id: 700 });
   };
   const first = () => auditRequest(9100, userMessage(10, { text: "廣告" }));
@@ -1552,19 +1577,19 @@ test("Telegram 暫時失敗後可補送同一道題與通過通知，絕不把�
   assert.equal((await worker.fetch(first(), env)).status, 200);
   assert.equal((await db.prepare("SELECT captcha_code FROM users").first()).captcha_code, code);
   assert.equal(calls[0].payload.text, calls[1].payload.text);
-  fail = true;
+  failPassed = true;
   const answer = () => auditRequest(9101, userMessage(11, { text: String(captchaQuestion(code).answer) }));
   assert.equal((await worker.fetch(answer(), env)).status, 500);
   assert.equal((await worker.fetch(answer(), env)).status, 200);
   assert.equal(calls.at(-1).payload.text, t("zh", "captchaPassed"));
-  assert.equal(calls.some((call) => call.method !== "sendMessage"), false);
+  assert.deepEqual(calls.filter((call) => call.method === "copyMessages").map((call) => call.payload.message_ids), [[10]]);
 }));
 
 test("答題併發清除或封鎖時不能通過驗證，也不能由舊更新恢復資料", async () => {
   for (const erase of [true, false]) await withDatabaseMock(async (db) => {
     const env = { ...auditEnv(db), CAPTCHA_ENABLED: undefined };
     globalThis.fetch = async () => telegramResponse({ message_id: 700 });
-    await processUpdate({ message: userMessage(10, { text: "/start" }) }, env);
+    await processUpdate({ message: userMessage(10, { text: "首次聯絡" }) }, env);
     const user = await db.prepare("SELECT * FROM users").first();
     const prepare = db.prepare.bind(db);
     db.prepare = (sql) => {
@@ -1631,10 +1656,11 @@ test("併發首次訊息只出一題；併發錯誤不重扣驗證次數", () =>
 
 test("驗證前 /id 不建資料，清除後舊答案無效且新聯絡必須重新驗證", () => withDatabaseMock(async (db) => {
   const env = { ...auditEnv(db), CAPTCHA_ENABLED: undefined };
-  globalThis.fetch = async () => telegramResponse({ message_id: 700 });
+  globalThis.fetch = async (url) => telegramResponse(String(url).endsWith("/copyMessages")
+    ? [{ message_id: 700 }] : String(url).endsWith("/createForumTopic") ? { message_thread_id: 72 } : { message_id: 700 });
   await processUpdate({ message: userMessage(1, { text: "/id" }) }, env);
   assert.equal((await db.prepare("SELECT COUNT(*) n FROM users").first()).n, 0);
-  await processUpdate({ message: userMessage(10, { text: "/start" }) }, env);
+  await processUpdate({ message: userMessage(10, { text: "首次聯絡" }) }, env);
   const answer = String(captchaQuestion((await db.prepare("SELECT captcha_code FROM users").first()).captcha_code).answer);
   await processUpdate({ message: userMessage(11, { text: answer }) }, env);
   await processUpdate({ message: userMessage(20, { text: "/forget confirm" }) }, env);
@@ -1655,6 +1681,7 @@ test("管理者私訊開關立即生效，跨請求保留並優先於部署預�
   const env = auditEnv(db, false), calls = [];
   globalThis.fetch = async (url, init) => {
     calls.push({ method: String(url).split("/").pop(), payload: JSON.parse(init.body) });
+    if (String(url).endsWith("/copyMessages")) return telegramResponse([{ message_id: 700 }]);
     return telegramResponse({ message_id: 700 });
   };
   await processUpdate({ message: adminMessage(10, "/captcha") }, env);
@@ -1748,4 +1775,156 @@ test("開關寫入暫時失敗可重試，設定列遺失時 ready 與新轉送�
   assert.equal((await worker.fetch(auditRequest(9202, userMessage(20, { text: "不應轉送" })), env)).status, 500);
   assert.equal(sends, 1);
   assert.equal((await db.prepare("SELECT COUNT(*) n FROM users").first()).n, 0);
+}));
+
+test("首組相簿只暫存最多十個 ID，通過後整組自動轉送；晚到項目不受答案水位誤攔", () => withDatabaseMock(async (db) => {
+  const env = { ...auditEnv(db), CAPTCHA_ENABLED: undefined }, calls = [];
+  globalThis.fetch = async (url, init) => {
+    const method = String(url).split("/").pop(), payload = JSON.parse(init.body);
+    calls.push({ method, payload });
+    return telegramResponse(method === "copyMessages" ? payload.message_ids.map((id) => ({ message_id: 1000 + id }))
+      : method === "createForumTopic" ? { message_thread_id: 72 } : { message_id: 700 });
+  };
+  await Promise.all(Array.from({ length: 10 }, (_, index) => processUpdate({ message:
+    userMessage(10 + index, { photo: [{}], media_group_id: "first" }) }, env)));
+  await processUpdate({ message: userMessage(20, { photo: [{}], media_group_id: "first" }) }, env);
+  await processUpdate({ message: userMessage(30, { photo: [{}], media_group_id: "other" }) }, env);
+  assert.equal(calls.length, 1);
+  assert.equal((await db.prepare("SELECT COUNT(*) n FROM media_group_messages").first()).n, 10);
+  db.database.exec("UPDATE users SET captcha_code=0; UPDATE media_groups SET updated_at_ms=updated_at_ms-1000");
+  await processUpdate({ message: userMessage(200, { text: "2" }) }, env);
+  assert.deepEqual(calls.filter((call) => call.method === "copyMessages").map((call) => call.payload.message_ids),
+    [Array.from({ length: 10 }, (_, i) => i + 10)]);
+  assert.equal((await db.prepare("SELECT captcha_pending_group FROM users").first()).captcha_pending_group, null);
+  await processUpdate({ message: userMessage(21, { photo: [{}], media_group_id: "first" }) }, env);
+  assert.deepEqual(calls.filter((call) => call.method === "copyMessages").at(-1).payload.message_ids, [21]);
+  await processUpdate({ message: userMessage(10, { photo: [{}], media_group_id: "first" }) }, env);
+  assert.equal(calls.filter((call) => call.method === "copyMessages").length, 2);
+}));
+
+test("首次暫存的 D1 批次失敗會完整回滾，重送後保存原訊息且不保存內容本體", () => withDatabaseMock(async (db) => {
+  const env = { ...auditEnv(db), CAPTCHA_ENABLED: undefined };
+  globalThis.fetch = async () => telegramResponse({ message_id: 700 });
+  injectWriteFailure(db, (sql) => /INSERT OR IGNORE INTO media_groups/.test(sql));
+  const request = () => auditRequest(9300, userMessage(10, { text: "不得存入 D1 的私人內容" }));
+  assert.equal((await worker.fetch(request(), env)).status, 500);
+  let user = await db.prepare("SELECT * FROM users").first();
+  assert.equal(user.captcha_code, null);
+  assert.equal(user.captcha_pending_group, null);
+  assert.equal((await db.prepare("SELECT COUNT(*) n FROM media_group_messages").first()).n, 0);
+  assert.equal((await worker.fetch(request(), env)).status, 200);
+  user = await db.prepare("SELECT * FROM users").first();
+  assert.ok(user.captcha_pending_group);
+  const rows = await db.prepare("SELECT * FROM media_group_messages").all();
+  assert.equal(rows.results[0].message_id, 10);
+  assert.ok(!JSON.stringify([user, rows]).includes("不得存入 D1 的私人內容"));
+}));
+
+test("通過後第一則訊息狀態寫入失敗，重試沿用已保存對照而不重複複製", () => withDatabaseMock(async (db) => {
+  const env = { ...auditEnv(db), CAPTCHA_ENABLED: undefined };
+  let copies = 0;
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/copyMessages")) { copies++; return telegramResponse([{ message_id: 700 }]); }
+    return telegramResponse(String(url).endsWith("/createForumTopic") ? { message_thread_id: 72 } : { message_id: 701 });
+  };
+  await processUpdate({ message: userMessage(10, { text: "第一則" }) }, env);
+  db.database.exec("UPDATE users SET captcha_code=0; UPDATE media_groups SET updated_at_ms=updated_at_ms-1000");
+  injectWriteFailure(db, (sql) => /UPDATE media_groups SET state = 'done'/.test(sql));
+  const answer = () => auditRequest(9301, userMessage(11, { text: "2" }));
+  assert.equal((await worker.fetch(answer(), env)).status, 500);
+  assert.ok((await db.prepare("SELECT captcha_pending_group FROM users").first()).captcha_pending_group);
+  assert.equal((await worker.fetch(answer(), env)).status, 200);
+  assert.equal(copies, 1);
+  assert.equal((await db.prepare("SELECT COUNT(*) n FROM message_map").first()).n, 1);
+  assert.equal((await db.prepare("SELECT captcha_pending_group FROM users").first()).captcha_pending_group, null);
+}));
+
+test("首次自動轉送失去更新租約時撤回副本，保留待送指標讓新租約恢復", () => withDatabaseMock(async (db) => {
+  const env = { ...auditEnv(db), CAPTCHA_ENABLED: undefined };
+  let copies = 0, rollbacks = 0, loseLease = true;
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/copyMessages")) {
+      copies++;
+      if (loseLease) {
+        loseLease = false;
+        db.database.exec("UPDATE processed_updates SET status='failed',lease_token='replacement' WHERE update_id=9302");
+      }
+      return telegramResponse([{ message_id: 700 + copies }]);
+    }
+    if (String(url).endsWith("/deleteMessages")) rollbacks++;
+    return telegramResponse(String(url).endsWith("/createForumTopic") ? { message_thread_id: 72 } : { message_id: 701 });
+  };
+  await processUpdate({ message: userMessage(10, { text: "第一則" }) }, env);
+  db.database.exec("UPDATE users SET captcha_code=0; UPDATE media_groups SET updated_at_ms=updated_at_ms-1000");
+  const answer = () => auditRequest(9302, userMessage(11, { text: "2" }));
+  assert.equal((await worker.fetch(answer(), env)).status, 500);
+  assert.ok((await db.prepare("SELECT captcha_pending_group FROM users").first()).captcha_pending_group);
+  assert.equal((await db.prepare("SELECT state FROM media_groups").first()).state, "collecting");
+  assert.equal((await worker.fetch(answer(), env)).status, 200);
+  assert.equal(rollbacks, 1);
+  assert.equal(copies, 2);
+  assert.equal((await db.prepare("SELECT COUNT(*) n FROM message_map").first()).n, 1);
+}));
+
+test("原訊息已無法取得時保留驗證結果、釋放待送狀態，後續正常訊息仍可送達", () => withDatabaseMock(async (db) => {
+  const env = { ...auditEnv(db), CAPTCHA_ENABLED: undefined }, calls = [];
+  globalThis.fetch = async (url, init) => {
+    const method = String(url).split("/").pop();
+    calls.push({ method, payload: JSON.parse(init.body) });
+    return telegramResponse(method === "copyMessages" ? [] : method === "createForumTopic"
+      ? { message_thread_id: 72 } : { message_id: 700 });
+  };
+  await processUpdate({ message: userMessage(10, { text: "已被刪除的內容" }) }, env);
+  db.database.exec("UPDATE users SET captcha_code=0; UPDATE media_groups SET updated_at_ms=updated_at_ms-1000");
+  const response = await worker.fetch(auditRequest(9303, userMessage(11, { text: "2" })), env);
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).discarded, true);
+  const user = await db.prepare("SELECT * FROM users").first();
+  assert.equal(user.captcha_verified, 1);
+  assert.equal(user.captcha_pending_group, null);
+  await processUpdate({ message: userMessage(20, { text: "重新傳送內容" }) }, env);
+  assert.equal(calls.at(-1).method, "copyMessage");
+  assert.equal(calls.at(-1).payload.message_id, 20);
+}));
+
+test("舊版本尚未完成的題目沒有待送 ID 時不轉送舊答案，下一則內容採新流程", () => withDatabaseMock(async (db) => {
+  const env = { ...auditEnv(db), CAPTCHA_ENABLED: undefined }, calls = [];
+  seedAuditUser(db);
+  await db.prepare("UPDATE users SET captcha_code=0,captcha_until=?,captcha_message_id=10")
+    .bind(Math.floor(Date.now() / 1000) + 300).run();
+  globalThis.fetch = async (url, init) => {
+    const method = String(url).split("/").pop(), payload = JSON.parse(init.body);
+    calls.push({ method, payload });
+    return telegramResponse(method === "copyMessages" ? [{ message_id: 700 }] : { message_id: 701 });
+  };
+  await processUpdate({ message: userMessage(11, { text: "2" }) }, env);
+  assert.equal(calls.at(-1).payload.text, t("zh", "captchaExpired"));
+  await processUpdate({ message: userMessage(12, { text: "新的聯絡內容" }) }, env);
+  db.database.exec("UPDATE users SET captcha_code=0; UPDATE media_groups SET updated_at_ms=updated_at_ms-1000");
+  await processUpdate({ message: userMessage(20, { text: "2" }) }, env);
+  assert.deepEqual(calls.filter((call) => call.method === "copyMessages").map((call) => call.payload.message_ids), [[12]]);
+}));
+
+test("首次自動轉送期間清除資料會撤回副本，待送參照與路由都不能由舊工作重建", () => withDatabaseMock(async (db) => {
+  const env = { ...auditEnv(db), CAPTCHA_ENABLED: undefined };
+  let rollbacks = 0;
+  globalThis.fetch = async (url) => {
+    if (String(url).endsWith("/copyMessages")) {
+      await processUpdate({ message: userMessage(20, { text: "/forget confirm" }) }, env);
+      return telegramResponse([{ message_id: 700 }]);
+    }
+    if (String(url).endsWith("/deleteMessages")) rollbacks++;
+    return telegramResponse(String(url).endsWith("/createForumTopic") ? { message_thread_id: 72 } : { message_id: 701 });
+  };
+  await processUpdate({ message: userMessage(10, { text: "第一則" }) }, env);
+  db.database.exec("UPDATE users SET captcha_code=0; UPDATE media_groups SET updated_at_ms=updated_at_ms-1000");
+  await processUpdate({ message: userMessage(11, { text: "2" }) }, env);
+  const user = await db.prepare("SELECT * FROM users").first();
+  assert.equal(user.erased, 1);
+  assert.equal(user.captcha_verified, 0);
+  assert.equal(user.captcha_pending_group, null);
+  assert.equal(rollbacks, 1);
+  for (const table of ["message_map", "media_groups", "media_group_messages"]) {
+    assert.equal((await db.prepare(`SELECT COUNT(*) n FROM ${table}`).first()).n, 0);
+  }
 }));

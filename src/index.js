@@ -349,9 +349,23 @@ async function processUserMessage(message, env) {
   }
 
   if (message.message_id <= (user?.forgotten_message_id || 0)) return;
+  if (command === "start") {
+    await telegram(env, "sendMessage", {
+      chat_id: message.chat.id,
+      text: env.WELCOME_MESSAGE || t(env.BOT_LANGUAGE, "welcome")
+    });
+    return;
+  }
+  if (user?.captcha_verified && user.captcha_pending_group) {
+    await resumeCaptchaMessage(message, user, env, now);
+    user = await getUser(env.BOT_DB, userId);
+  }
   const needsCaptcha = !user?.captcha_verified && await captchaEnabled(env);
-  // Never relay a verification answer or earlier content after verification succeeds.
-  if (user?.captcha_message_id >= message.message_id) {
+  // Late members of the first album can arrive after the answer's update.
+  const firstAlbum = user?.captcha_verified && message.media_group_id && message.message_id <= user.captcha_message_id
+    ? await getMediaGroup(env.BOT_DB, userId, captchaGroupId(message)) : null;
+  if (user?.captcha_message_id >= message.message_id && !(firstAlbum
+    && firstAlbum.user_generation === user.generation && firstAlbum.state !== "rejected")) {
     if (user.captcha_verified && user.captcha_message_id === message.message_id) {
       await telegram(env, "sendMessage", { chat_id: message.chat.id, text: t(env.BOT_LANGUAGE, "captchaPassed") });
     } else if (needsCaptcha) await processCaptcha(message, user, env, now);
@@ -370,14 +384,7 @@ async function processUserMessage(message, env) {
   );
   user = await upsertUser(env.BOT_DB, message.from, now, message.message_id);
   if (!user || user.blocked || user.erased || message.message_id <= user.forgotten_message_id) return;
-
-  if (command === "start") {
-    await telegram(env, "sendMessage", {
-      chat_id: message.chat.id,
-      text: env.WELCOME_MESSAGE || t(env.BOT_LANGUAGE, "welcome")
-    });
-    return;
-  }
+  if (user.captcha_pending_group) await resumeCaptchaMessage(message, user, env, now);
   if (message.media_group_id) {
     const queued = await enqueueMediaMessage(message, user, "user_to_admin", env, now, interval);
     if (queued.rejected) {
@@ -453,6 +460,52 @@ async function captchaEnabled(env) {
   return settings.captcha_enabled == null ? env.CAPTCHA_ENABLED !== "false" : settings.captcha_enabled === 1;
 }
 
+function captchaGroupId(message) {
+  return message.media_group_id ? `captcha:album:${message.media_group_id}` : `captcha:message:${message.message_id}`;
+}
+
+async function clearCaptchaPending(db, user, resetCode = false) {
+  if (!user.captcha_pending_group && (!resetCode || user.captcha_code == null)) return;
+  const group = user.captcha_pending_group ?? null;
+  await db.batch([
+    ...(group ? ["media_group_messages", "media_groups"] : []).map((table) => db.prepare(`
+      DELETE FROM ${table} WHERE source_chat_id = ? AND media_group_id = ?
+        AND EXISTS (SELECT 1 FROM users WHERE user_id = ? AND generation = ? AND captcha_pending_group = ?
+          AND captcha_message_id = ? AND captcha_verified = 0)
+    `).bind(user.user_id, group, user.user_id, user.generation, group, user.captcha_message_id)),
+    db.prepare(`UPDATE users SET captcha_pending_group = NULL,
+      captcha_code = CASE WHEN ? = 1 THEN NULL ELSE captcha_code END,
+      captcha_until = CASE WHEN ? = 1 THEN 0 ELSE captcha_until END
+      WHERE user_id = ? AND generation = ? AND captcha_pending_group IS ? AND captcha_message_id = ? AND captcha_verified = 0
+    `).bind(resetCode ? 1 : 0, resetCode ? 1 : 0, user.user_id, user.generation, group, user.captcha_message_id)
+  ]);
+}
+
+async function resumeCaptchaMessage(message, user, env, now) {
+  const groupId = user.captcha_pending_group;
+  await requireCurrentUser(env.BOT_DB, user, true);
+  const current = await upsertUser(env.BOT_DB, message.from, now, message.message_id);
+  if (!current || current.erased || current.blocked || current.generation !== user.generation) throw new ObsoleteWorkError();
+  const clear = () => env.BOT_DB.prepare(`UPDATE users SET captcha_pending_group = NULL
+    WHERE user_id = ? AND generation = ? AND captcha_pending_group = ?
+  `).bind(user.user_id, user.generation, groupId).run();
+  await env.BOT_DB.prepare(`UPDATE media_groups SET state = 'collecting', lease_until_ms = 0, lease_token = NULL
+    WHERE source_chat_id = ? AND media_group_id = ? AND user_generation = ? AND state = 'initializing'
+      AND EXISTS (SELECT 1 FROM users WHERE user_id = ? AND generation = ? AND captcha_verified = 1
+        AND blocked = 0 AND erased = 0 AND captcha_pending_group = ?)
+  `).bind(user.user_id, groupId, user.generation, user.user_id, user.generation, groupId).run();
+  try {
+    await flushMediaGroup(user.user_id, groupId, env);
+  } catch (error) {
+    if (!isRetryableError(error) && !(error instanceof ObsoleteWorkError)) await clear();
+    throw error;
+  }
+  const group = await getMediaGroup(env.BOT_DB, user.user_id, groupId);
+  if (group && !["done", "rejected"].includes(group.state)) throw new RetryableError("首次訊息仍在轉送中");
+  await clear();
+  if (!group) await telegram(env, "sendMessage", { chat_id: user.user_id, text: t(env.BOT_LANGUAGE, "captchaPendingLost") });
+}
+
 async function processCaptcha(message, user, env, now) {
   const db = env.BOT_DB;
   if (!user) {
@@ -465,6 +518,25 @@ async function processCaptcha(message, user, env, now) {
     chat_id: message.chat.id,
     text: t(env.BOT_LANGUAGE, key).replace("{question}", code == null ? "" : captchaQuestion(code).question)
   });
+  if (message.media_group_id && user.captcha_pending_group === captchaGroupId(message)
+    && user.captcha_until > now && user.captcha_attempts < 3) {
+    await db.batch([
+      db.prepare(`INSERT OR IGNORE INTO media_group_messages(source_chat_id, media_group_id, message_id, created_at)
+        SELECT ?, ?, ?, ? FROM users WHERE user_id = ? AND generation = ? AND erased = 0 AND blocked = 0
+          AND captcha_verified = 0 AND captcha_pending_group = ? AND captcha_until > ?
+          AND (SELECT COUNT(*) FROM media_group_messages WHERE source_chat_id = ? AND media_group_id = ?) < 10
+      `).bind(user.user_id, user.captcha_pending_group, message.message_id, now, user.user_id, user.generation,
+        user.captcha_pending_group, now, user.user_id, user.captcha_pending_group),
+      db.prepare(`UPDATE media_groups SET updated_at_ms = ? WHERE source_chat_id = ? AND media_group_id = ?
+        AND state = 'initializing' AND user_generation = ? AND EXISTS
+          (SELECT 1 FROM users WHERE user_id = ? AND generation = ? AND captcha_verified = 0 AND captcha_until > ?)
+      `).bind(Date.now(), user.user_id, user.captcha_pending_group, user.generation, user.user_id, user.generation, now)
+    ]);
+    const current = await getUser(db, user.user_id);
+    if (current?.captcha_verified && current.generation === user.generation) return processUserMessage(message, env);
+    if (message.message_id === user.captcha_message_id) await send("captchaPrompt");
+    return;
+  }
   if (message.message_id <= user.captcha_message_id) {
     if (message.message_id === user.captcha_message_id) {
       await send(user.captcha_until <= now ? "captchaExpired" : user.captcha_attempts >= 3
@@ -473,22 +545,51 @@ async function processCaptcha(message, user, env, now) {
     return;
   }
   if (user.captcha_attempts >= 3 && user.captcha_until > now) return;
-  if (user.captcha_code == null || user.captcha_until <= now) {
+  const answer = typeof message.text === "string" && message.text.length <= 16
+    ? message.text.normalize("NFKC").trim() : "";
+  if (user.captcha_code != null && (user.captcha_until <= now || !user.captcha_pending_group)
+    && /^\d{1,3}$/.test(answer)) {
+    await clearCaptchaPending(db, user, true);
+    const expired = await db.prepare(`UPDATE users SET captcha_code = NULL, captcha_until = 0,
+      captcha_attempts = 0, captcha_last_at = ?, captcha_message_id = ?
+      WHERE user_id = ? AND generation = ? AND captcha_verified = 0 AND captcha_code IS NULL
+        AND captcha_message_id = ? AND captcha_until = 0
+    `).bind(now, message.message_id, user.user_id, user.generation, user.captcha_message_id).run();
+    if (Number(expired.meta?.changes || 0) === 1) await send("captchaExpired");
+    return;
+  }
+  if (user.captcha_code == null || user.captcha_until <= now || !user.captcha_pending_group) {
+    await clearCaptchaPending(db, user, true);
     const code = crypto.getRandomValues(new Uint32Array(1))[0] % 324;
-    const result = await db.prepare(`
+    const groupId = captchaGroupId(message);
+    const result = await db.batch([db.prepare(`
       UPDATE users SET captcha_code = ?, captcha_until = ?, captcha_attempts = 0,
-        captcha_last_at = ?, captcha_message_id = ?, erased = 0, updated_at = ?
+        captcha_last_at = ?, captcha_message_id = ?, captcha_pending_group = ?, erased = 0, updated_at = ?
       WHERE user_id = ? AND generation = ? AND blocked = 0 AND captcha_verified = 0
         AND forgotten_message_id < ? AND captcha_message_id < ?
         AND (captcha_code IS NULL OR captcha_until <= ?)
-    `).bind(code, now + CAPTCHA_TTL_SECONDS, now, message.message_id, now,
-      user.user_id, user.generation, message.message_id, message.message_id, now).run();
-    if (Number(result.meta?.changes || 0) === 1) await send("captchaPrompt", code);
+    `).bind(code, now + CAPTCHA_TTL_SECONDS, now, message.message_id, groupId, now,
+      user.user_id, user.generation, message.message_id, message.message_id, now),
+      db.prepare(`INSERT OR IGNORE INTO media_groups(source_chat_id, media_group_id, user_id, direction,
+        state, updated_at_ms, created_at, user_generation)
+        SELECT user_id, ?, user_id, 'user_to_admin', 'initializing', ?, ?, generation FROM users
+        WHERE user_id = ? AND generation = ? AND captcha_pending_group = ? AND captcha_message_id = ? AND captcha_verified = 0
+      `).bind(groupId, Date.now(), now, user.user_id, user.generation, groupId, message.message_id),
+      db.prepare(`INSERT OR IGNORE INTO media_group_messages(source_chat_id, media_group_id, message_id, created_at)
+        SELECT user_id, ?, ?, ? FROM users WHERE user_id = ? AND generation = ?
+          AND captcha_pending_group = ? AND captcha_message_id = ? AND captcha_verified = 0
+      `).bind(groupId, message.message_id, now, user.user_id, user.generation, groupId, message.message_id)
+    ]);
+    if (Number(result[0].meta?.changes || 0) === 1) await send("captchaPrompt", code);
+    else if (message.media_group_id) {
+      const current = await getUser(db, user.user_id);
+      if (current?.captcha_pending_group === groupId && current.generation === user.generation) {
+        return processCaptcha(message, current, env, now);
+      }
+    }
     return;
   }
 
-  const answer = typeof message.text === "string" && message.text.length <= 16
-    ? message.text.normalize("NFKC").trim() : "";
   if (/^\d{1,3}$/.test(answer) && Number(answer) === captchaQuestion(user.captcha_code).answer) {
     const result = await db.prepare(`
       UPDATE users SET captcha_verified = 1, captcha_code = NULL, captcha_until = 0,
@@ -498,7 +599,10 @@ async function processCaptcha(message, user, env, now) {
         AND forgotten_message_id < ? AND captcha_message_id < ?
     `).bind(now, message.message_id, now, user.user_id, user.generation,
       user.captcha_code, now, message.message_id, message.message_id).run();
-    if (Number(result.meta?.changes || 0) === 1) await send("captchaPassed");
+    if (Number(result.meta?.changes || 0) === 1) {
+      if (user.captcha_pending_group) await resumeCaptchaMessage(message, user, env, now);
+      await send("captchaPassed");
+    }
     return;
   }
 
@@ -515,6 +619,7 @@ async function processCaptcha(message, user, env, now) {
     now, message.message_id, now, user.user_id, user.generation, user.captcha_code,
     now, user.captcha_attempts, user.captcha_last_at, message.message_id, message.message_id).run();
   if (Number(result.meta?.changes || 0) === 1) {
+    if (attempts >= 3) await clearCaptchaPending(db, { ...user, captcha_message_id: message.message_id });
     await send(attempts >= 3 ? "captchaLocked" : reminder ? "captchaPrompt" : "captchaWrong");
   }
 }
@@ -543,7 +648,7 @@ async function forgetUser(db, userId, messageId, now) {
         topic_card_message_id = NULL, topic_lease_until = 0, topic_lease_token = NULL,
         last_rate_key = NULL, blocked_notice_at = 0, updated_at = ?,
         captcha_verified = 0, captcha_code = NULL, captcha_until = 0, captcha_attempts = 0,
-        captcha_last_at = 0, captcha_message_id = 0,
+        captcha_last_at = 0, captcha_message_id = 0, captcha_pending_group = NULL,
         generation = generation + 1, erased = 1, forgotten_message_id = ?, forgotten_at = ?
       WHERE user_id = ? AND forgotten_message_id < ?
     `).bind(now, messageId, now, userId, messageId)
@@ -776,13 +881,14 @@ async function processEditedMessage(message, env) {
   let editingUser;
   if (isUserEdit) {
     editingUser = await getUser(env.BOT_DB, String(message.from.id));
-    if (editingUser?.blocked || editingUser?.erased || (!editingUser?.captcha_verified && await captchaEnabled(env))
-      || message.message_id <= (editingUser?.captcha_message_id || 0)) return;
+    if (editingUser?.blocked || editingUser?.erased
+      || (!editingUser?.captcha_verified && await captchaEnabled(env))) return;
   }
   const mapping = await env.BOT_DB.prepare(
     "SELECT target_chat_id, target_message_id, user_id FROM message_map WHERE source_chat_id = ? AND source_message_id = ?"
   ).bind(chatId, message.message_id).first();
   if (!mapping) {
+    if (isUserEdit && message.message_id <= (editingUser?.captcha_message_id || 0)) return;
     if (parseCommand(message.text)) return;
     if (isAdminPrivateEdit && !message.reply_to_message?.message_id) return;
     throw new RetryableError("編輯訊息尚未建立轉送映射");
@@ -1026,7 +1132,7 @@ async function flushMediaGroup(sourceChatId, mediaGroupId, env) {
         UPDATE media_groups SET state = ?, lease_until_ms = 0, lease_token = NULL, last_error = ?
         WHERE source_chat_id = ? AND media_group_id = ? AND lease_token = ?
       `).bind(
-        isRetryableError(error) ? "collecting" : "rejected",
+        isRetryableError(error) || error instanceof ObsoleteWorkError ? "collecting" : "rejected",
         sanitizeError(error),
         sourceChatId,
         mediaGroupId,
@@ -1051,6 +1157,7 @@ async function deliverMediaGroup(group, env) {
 
   const user = await getUser(env.BOT_DB, group.user_id);
   if (!user || user.erased || user.generation !== group.user_generation) throw new ObsoleteWorkError();
+  if (group.media_group_id.startsWith("captcha:") && !user.captcha_verified) throw new ObsoleteWorkError();
   await requireCurrentUser(env.BOT_DB, user, group.direction === "user_to_admin");
   let targetChatId = user.user_id;
   let topicId;
@@ -1575,6 +1682,7 @@ async function readiness(env) {
         (SELECT forgotten_message_id FROM users LIMIT 1) AS forgotten_message_id,
         (SELECT captcha_verified + captcha_until + captcha_attempts + captcha_last_at + captcha_message_id
           + COALESCE(captcha_code, 0) FROM users LIMIT 1) AS captcha,
+        (SELECT captcha_pending_group FROM users LIMIT 1) AS captcha_pending,
         (SELECT lease_token FROM processed_updates LIMIT 1) AS update_lease,
         (SELECT user_generation FROM media_groups LIMIT 1) AS album_generation,
         (SELECT lease_token FROM media_groups LIMIT 1) AS album_lease,

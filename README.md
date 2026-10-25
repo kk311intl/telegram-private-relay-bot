@@ -22,7 +22,7 @@ Version: v1.3.1 · License: [GPL-3.0-only](LICENSE)
 >
 > 遵守下方公開內容規則。Token 僅透過本機安全輸入或 Secret 欄位處理，不放入聊天、輸出或 Git；私有資料留在受 Git 忽略的位置。未經我要求，不覆寫既有設定、重建資源、輪替憑證、刪除還原備份、改寫程式、推送 GitHub 或建立 Release／tag。
 >
-> 首次聯絡的算術驗證預設開啟，除非我要求才關閉。升級時先套用 `0005_contact_verification.sql`，並用新測試帳號確認未驗證內容被攔截、答題後須重送內容。
+> 首次聯絡的算術驗證預設開啟，除非我要求才關閉。升級時先套用所有待執行的資料庫遷移，並用測試帳號確認 `/start` 只顯示歡迎、首則內容才出題，通過後自動轉送。
 >
 > 最後檢查 `/health`、`/ready`、Webhook 和安全探針，指導我用非管理者帳號完成私訊往返測試。管理者私訊 `/start` 設定選單，再用 `/status` 確認；清除功能只用測試帳號。遇到阻礙時說明原因及下一個操作，不把未驗證項目當作完成。交付 Bot 連結、Worker 網址、模式、語言、驗證結果與憑證保管位置，不顯示秘密值。
 
@@ -125,13 +125,15 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 
 ### 首次聯絡驗證
 
-新聯絡者先回答一道簡單加減乘除題，5 分鐘內只回覆數字；除法都是整數。連錯 3 次暫停 15 分鐘，再傳 `/start` 取得新題。一般錯誤至少間隔 5 秒才計次及回覆，指令提醒至少間隔 60 秒；冷卻中的訊息直接忽略。`/help`、`/id`、`/forget` 仍可使用。
+`/start` 保留原歡迎訊息，不出題也不免除驗證。新聯絡者傳第一則內容時，Bot 才說明為了攔截自動化廣告而要求算術驗證。5 分鐘內只回覆數字，除法都是整數；連錯 3 次暫停 15 分鐘。一般錯誤至少間隔 5 秒才計次及回覆；冷卻中的內容忽略。`/help`、`/id`、`/forget` 仍可使用。
 
-通過前不建立話題、不轉送或暫存內容；通過後須重送內容，答題與舊內容不會補送。升級前先套用 `0005_contact_verification.sql`：既有未清除的聯絡者免重驗，清除資料後返回則重新驗證。可在部署設定以 `CAPTCHA_ENABLED="false"` 關閉；`WELCOME_MESSAGE` 仍用於已通過者的 `/start`。
+通過前只暫存第一則訊息的 Telegram ID；若是相簿，暫存同組最多 10 個 ID，不保存文字或媒體本體，也不建立話題。通過後自動轉送第一則內容或首組相簿，不必重送；答案與其他未驗證訊息不補送。題目過期或錯誤過多時清除待送紀錄，之後須重新傳送聯絡內容。暫存參照沿用原有相簿紀錄的清理週期。
+
+升級前套用所有待執行的資料庫遷移，包含 `0006_verification_pending_message.sql`。既有未清除的聯絡者免重驗，清除資料後返回則重新驗證。`CAPTCHA_ENABLED="false"` 可將初始狀態設為關閉；`WELCOME_MESSAGE` 仍用於使用者的 `/start`。
 
 管理者私訊 `/captcha` 查看狀態，用 `/captcha on` 或 `/captcha off` 切換，無須重新部署。開關保存在 D1，優先於部署預設；只在新聯絡者或未驗證者需要判斷時多讀取一筆設定。重新開啟不追溯要求已獲准聯絡者補驗，關閉也不解除既有封鎖。
 
-驗證只擋簡單自動廣告，能解題的程式或真人仍可通過。已通過者不增加 D1 查詢或寫入；未通過者只保存必要的 User ID 與驗證狀態，7 天未活動後用原有排程清除。沒有新增依賴、服務或排程；每個 Webhook 的既有去重寫入仍會消耗額度，這不是抗流量攻擊服務。
+驗證只擋簡單自動廣告，能解題的程式或真人仍可通過。首則待送處理完成後，正常聊天不增加 D1 查詢或寫入；未通過者的控制紀錄在 7 天未活動後用原有排程清除。沒有新增依賴、服務或排程；每個 Webhook 的既有去重寫入仍會消耗額度，這不是抗流量攻擊服務。
 
 ### 資料與限制
 
@@ -184,7 +186,7 @@ Telegram の個別チャットを管理者へ転送し、Bot を通して返信�
 >
 > 下の公開ルールを守り、Token はローカルの安全な入力か Secret 欄だけで扱い、チャット・出力・Git に含めないでください。私有データは Git の対象外に置きます。依頼なしに既存設定の上書き、リソースの再作成、認証情報の更新、復旧用バックアップの削除、コード変更、GitHub への push、Release／tag の作成をしないでください。
 >
-> 初回の計算確認は既定で有効にし、私が依頼した場合だけ無効にしてください。更新時は先に `0005_contact_verification.sql` を適用し、新しいテストアカウントで未確認の内容が転送されないことと、確認後の再送が必要なことを確認してください。
+> 初回の計算確認は既定で有効にし、私が依頼した場合だけ無効にしてください。未適用のデータベース移行を先に適用し、テストアカウントで `/start` は案内のみ、最初の内容で問題を表示し、確認後に自動転送することを確認してください。
 >
 > 最後に `/health`、`/ready`、Webhook、安全なプローブを確認し、管理者以外のアカウントで送信と返信を試せるよう案内してください。管理者には Bot との個別チャットで `/start` と `/status` を使ってもらい、消去機能はテスト用アカウントだけで確認してください。止まったら理由と次の操作を説明し、未確認の項目を完了扱いにしないでください。Bot のリンク、Worker URL、モード、言語、検証結果、認証情報の保管場所をまとめ、秘密の値は表示しないでください。
 
@@ -287,13 +289,15 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 
 ### 初回の確認
 
-初回は簡単な四則演算の問題に、5分以内に数字だけで答えます。割り算は割り切れます。3回間違えると15分間待ち、`/start` で再開します。誤答への応答と計数は最低5秒、コマンドによる案内は最低60秒の間隔を空け、待機中の新着は無視します。`/help`、`/id`、`/forget` は引き続き使えます。
+`/start` は元の案内だけを表示し、問題は出さず確認も免除しません。新しい連絡者が最初の内容を送ると、自動広告を防ぐための計算確認を案内します。5分以内に数字だけで答え、割り算は割り切れます。3回間違えると15分間待ちます。誤答への応答と計数は最低5秒間隔で、待機中の内容は無視します。`/help`、`/id`、`/forget` は引き続き使えます。
 
-確認前はトピックを作らず、内容を転送・一時保存しません。確認後に内容を送り直す必要があり、答えや古い内容は後から転送しません。更新前に `0005_contact_verification.sql` を適用してください。既存の消去されていない連絡者は再確認不要で、データ消去後は再確認が必要です。デプロイ設定の `CAPTCHA_ENABLED="false"` で無効にできます。`WELCOME_MESSAGE` は確認済みユーザーの `/start` に使います。
+確認前は最初のメッセージの Telegram ID、アルバムなら同じ組の最大10件の ID のみ一時保存します。本文やメディア本体は保存せず、トピックも作りません。確認後に最初の内容またはアルバムを自動転送するため、再送は不要です。答えや他の未確認メッセージは転送しません。期限切れや誤答上限では待機記録を消し、連絡内容の再送が必要です。一時参照は既存のアルバム記録の定期処理で削除します。
+
+更新前に `0006_verification_pending_message.sql` を含む未適用のデータベース移行を適用してください。既存の消去されていない連絡者は再確認不要で、データ消去後は再確認が必要です。`CAPTCHA_ENABLED="false"` は初期設定を無効にします。`WELCOME_MESSAGE` はユーザーの `/start` に使います。
 
 管理者が個別チャットで `/captcha` を送ると状態を確認でき、`/captcha on` または `/captcha off` で切り替えます。再デプロイは不要で、設定は D1 に保持され、デプロイの初期設定より優先されます。新規または未確認ユーザーの判定時だけ、設定を1件追加で読みます。再有効化しても連絡を許可済みのユーザーに再確認は要求せず、無効化してもブロックは解除しません。
 
-単純な自動広告を減らすための確認で、計算できるプログラムや人は通過できます。確認済みの通常転送に D1 の読み書きは追加しません。未確認者は必要な User ID と確認状態のみ保存し、7日間活動がなければ既存の定期処理で削除します。依存関係・サービス・定期処理の追加はありませんが、Webhook の既存の重複防止処理は引き続き枠を消費します。大量アクセスを防ぐ仕組みではありません。
+単純な自動広告を減らすための確認で、計算できるプログラムや人は通過できます。最初の待機内容の処理後は、通常転送に D1 の読み書きは追加しません。未確認者の制御記録は7日間活動がなければ既存の定期処理で削除します。依存関係・サービス・定期処理の追加はありませんが、Webhook の既存の重複防止処理は引き続き枠を消費します。大量アクセスを防ぐ仕組みではありません。
 
 ### データと制限
 
@@ -346,7 +350,7 @@ Give the repository link and this prompt to an AI coding assistant that can read
 >
 > Follow the public-content rules below. Handle tokens only through secure local input or Secret fields, never chat, output, or Git; keep private data in Git-ignored locations. Without my request, do not overwrite existing settings, recreate resources, rotate credentials, delete recovery backups, change source code, push to GitHub, or create a Release/tag.
 >
-> Keep the first-contact arithmetic check enabled unless I request otherwise. Apply `0005_contact_verification.sql` before upgrading the Worker, and use a new test account to verify that content is held back and must be resent after passing.
+> Keep the first-contact arithmetic check enabled unless I request otherwise. Apply all pending database migrations before upgrading. With a test account, verify that `/start` only welcomes, the first contact message triggers the check, and passing automatically relays that message.
 >
 > Verify `/health`, `/ready`, webhook status, and the safe runtime probe, then guide me through a real send-and-reply test with a non-admin account. Have the admin send `/start` and `/status` privately to the bot; use only test accounts for erasure. If blocked, explain why and give my next action; do not report unverified work as complete. Finish with the bot link, Worker URL, mode, language, checks, and credential storage location, without secret values.
 
@@ -449,13 +453,15 @@ Only `ADMIN_USER_ID` grants admin access. The admin sends `/start` privately to 
 
 ### First-contact check
 
-New contacts answer a simple arithmetic question with digits only within 5 minutes. Division always has an integer answer. Three wrong answers require a 15-minute wait, then `/start` starts a new check. Wrong attempts and responses are spaced at least 5 seconds apart; command reminders are spaced at least 60 seconds apart. New messages during the cooldown are ignored. `/help`, `/id`, and `/forget` remain available.
+`/start` keeps the original welcome, without a question or a verification exemption. A new contact's first content message triggers an arithmetic check explaining that it reduces automated ads. Reply with digits only within 5 minutes; division always has an integer answer. Three wrong answers require a 15-minute wait. Wrong attempts and responses are spaced at least 5 seconds apart, and content during the cooldown is ignored. `/help`, `/id`, and `/forget` remain available.
 
-Before passing, no topic is created and content is neither relayed nor queued. Users must resend their content after passing; answers and earlier content are never replayed. Apply `0005_contact_verification.sql` before upgrading: existing contacts whose data was not erased keep access, while returning users who erased their data verify again. Set `CAPTCHA_ENABLED="false"` in deployment settings to disable the check. `WELCOME_MESSAGE` still applies to verified users' `/start`.
+Before passing, only the first message's Telegram ID is staged, or up to 10 IDs belonging to the first album. No text or media content is stored and no topic is created. Passing automatically relays that first message or album, without resending. Answers and other unverified messages are not replayed. Expiry or too many wrong answers clears the pending references, requiring a new contact message. Temporary references use the existing album cleanup cycle.
+
+Apply all pending migrations, including `0006_verification_pending_message.sql`, before upgrading. Existing contacts whose data was not erased keep access; returning users who erased their data verify again. `CAPTCHA_ENABLED="false"` sets the initial default to off. `WELCOME_MESSAGE` applies to users' `/start`.
 
 The admin sends `/captcha` privately to view the state, or `/captcha on` / `/captcha off` to change it without redeploying. The setting persists in D1 and takes precedence over the deployment default. Only new or unverified contacts add one settings-row read when needed. Re-enabling does not require previously admitted contacts to verify again, and disabling does not remove existing blocks.
 
-This reduces simple automated ads; programs that solve arithmetic and people can still pass. Verified traffic adds no D1 queries or writes. Pending contacts store only their necessary User ID and verification state and are removed after 7 inactive days by the existing cleanup. No dependencies, services, or schedules are added. Existing webhook deduplication still consumes quota on each update; this is not flood protection.
+This reduces simple automated ads; programs that solve arithmetic and people can still pass. After the first pending message is handled, normal traffic adds no D1 queries or writes. Unverified contacts' control records are removed after 7 inactive days by the existing cleanup. No dependencies, services, or schedules are added. Existing webhook deduplication still consumes quota on each update; this is not flood protection.
 
 ### Data and limits
 
