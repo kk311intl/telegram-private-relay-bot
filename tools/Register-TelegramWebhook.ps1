@@ -30,7 +30,7 @@ try {
     $body = @{
         url = "$($resolvedWorkerUrl.AbsoluteUri.TrimEnd('/'))/webhook"
         secret_token = $webhookSecret
-        allowed_updates = @('message', 'edited_message')
+        allowed_updates = @('message', 'edited_message', 'callback_query')
         drop_pending_updates = $false
         max_connections = 10
     } | ConvertTo-Json -Depth 4

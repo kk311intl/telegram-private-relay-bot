@@ -128,6 +128,203 @@ function seedAuditUser(db) {
   db.database.exec("INSERT INTO users(user_id,first_name,topic_id,topic_card_message_id,created_at,updated_at) VALUES ('2','Test',72,0,1,1)");
 }
 
+function languageCallback(messageId, data, extra = {}) {
+  return { callback_query: { id: `callback-${messageId}`, from: { id: 2, is_bot: false }, data,
+    message: { message_id: messageId, chat: { id: 2, type: "private" } }, ...extra } };
+}
+
+test("三語按鈕保存用戶偏好，歡迎與指令跟隨選擇，管理端維持部署語言", async () => {
+  for (const language of ["zh", "en", "ja"]) await withDatabaseMock(async (db) => {
+    const calls = [], env = { ...auditEnv(db), WELCOME_MESSAGE: "自訂歡迎" };
+    globalThis.fetch = async (url, init) => {
+      calls.push({ method: String(url).split("/").pop(), payload: JSON.parse(init.body) });
+      return telegramResponse({ message_id: 11 });
+    };
+    await processUpdate({ message: userMessage(10, { text: "/start" }) }, env);
+    assert.equal(calls[0].payload.text, "自訂歡迎");
+    const buttons = calls[0].payload.reply_markup.inline_keyboard[0];
+    assert.deepEqual(buttons.map((button) => button.text), ["中文", "English", "日本語"]);
+    assert.equal((await db.prepare("SELECT COUNT(*) n FROM users").first()).n, 0);
+    const data = buttons.find((button) => button.callback_data.startsWith(`lang:${language}:`)).callback_data;
+    await processUpdate(languageCallback(11, data), env);
+    const user = await db.prepare("SELECT * FROM users WHERE user_id = '2'").first();
+    assert.equal(user.language, language);
+    assert.equal(user.captcha_verified, 0);
+    assert.equal(user.first_name, "");
+    const menu = calls.find((call) => call.method === "setMyCommands").payload;
+    assert.deepEqual(menu.scope, { type: "chat", chat_id: 2 });
+    assert.deepEqual(menu.commands.map((command) => command.command), ["start", "help", "language", "id", "forget"]);
+    assert.equal(menu.commands.find((command) => command.command === "help").description, t(language, "userCommand_help"));
+    assert.ok(calls.some((call) => call.method === "answerCallbackQuery"));
+    assert.deepEqual(calls.at(-1).payload.reply_markup, { inline_keyboard: [] });
+    await processUpdate({ message: userMessage(12, { text: "/help" }) }, { ...env });
+    assert.equal(calls.at(-1).payload.text, t(language, "userHelp"));
+    await processUpdate({ message: userMessage(13, { text: "/start", from: { id: 2, is_bot: false, language_code: "fr" } }) }, { ...env });
+    assert.equal(calls.at(-1).payload.text, language === "zh" ? "自訂歡迎" : t(language, "welcome"));
+    await processUpdate({ message: userMessage(14, { text: "/id" }) }, env);
+    assert.equal(calls.at(-1).payload.text, t(language, "userId") + t(language, "fieldSeparator") + "2");
+    await processUpdate({ message: adminMessage(15, "/help") }, env);
+    assert.equal(calls.at(-1).payload.text, t("zh", "adminHelpTopic"));
+    assert.equal((await db.prepare("SELECT COUNT(*) n FROM message_map").first()).n, 0);
+  });
+});
+
+test("語言指令在驗證前可用，切換不重置題目、不免驗也不轉送指令", () => withDatabaseMock(async (db) => {
+  const env = { ...auditEnv(db), CAPTCHA_ENABLED: "true" }, calls = [];
+  globalThis.fetch = async (url, init) => {
+    const method = String(url).split("/").pop();
+    calls.push({ method, payload: JSON.parse(init.body) });
+    return telegramResponse(method === "createForumTopic" ? { message_thread_id: 72 }
+      : method === "copyMessages" ? [{ message_id: 700 }] : { message_id: 701 });
+  };
+  await processUpdate({ message: userMessage(10, { text: "/language en" }) }, env);
+  await processUpdate({ message: userMessage(11, { text: "first contact" }) }, env);
+  assert.ok(calls.at(-1).payload.text.startsWith(t("en", "captchaPrompt").split("{question}")[0]));
+  const before = await db.prepare("SELECT * FROM users WHERE user_id = '2'").first();
+  await processUpdate({ message: userMessage(12, { text: "/language ja" }) }, env);
+  const after = await db.prepare("SELECT * FROM users WHERE user_id = '2'").first();
+  for (const key of ["captcha_code", "captcha_until", "captcha_attempts", "captcha_pending_group", "captcha_message_id", "captcha_verified"]) {
+    assert.equal(after[key], before[key], key);
+  }
+  assert.equal(calls.filter((call) => call.method.startsWith("copy")).length, 0);
+  await processUpdate({ message: userMessage(13, { text: String(captchaQuestion(before.captcha_code).answer) }) }, env);
+  assert.equal(calls.at(-1).payload.text, t("ja", "captchaPassed"));
+  assert.deepEqual(calls.find((call) => call.method === "copyMessages").payload.message_ids, [11]);
+  assert.ok(calls.some((call) => call.payload.text?.startsWith(`<b>${t("zh", "newChat")}</b>`)));
+}));
+
+test("語言按鈕只影響點選者的私訊，無效語言、管理者、群組與跨用戶回調不觸碰資料", async () => {
+  const env = { ...auditEnv({ prepare() { throw new Error("must not access data"); } }) };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error("must not call Telegram"); };
+  try {
+    for (const update of [
+      languageCallback(11, "lang:fr:0:10"), languageCallback(11, "lang:en:0:10:extra"),
+      languageCallback(11, "lang:en:0:0"), languageCallback(11, "lang:en:0:12"),
+      languageCallback(11, "lang:en:99999999999999999999:10"),
+      languageCallback(11, "lang:en:0:10", { from: { id: 3 } }),
+      languageCallback(11, "lang:en:0:10", { from: { id: 2, is_bot: true } }),
+      languageCallback(11, "lang:en:0:10", { message: undefined }),
+      languageCallback(11, "lang:en:0:10", { message: { message_id: 11, chat: { id: 2, type: "group" } } }),
+      languageCallback(11, "lang:en:0:10", { from: { id: 1 }, message: { message_id: 11, chat: { id: 1, type: "private" } } })
+    ]) await processUpdate(update, env);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test("清除資料同時清除語言和個別選單，舊按鈕與舊指令不能恢復偏好", () => withDatabaseMock(async (db) => {
+  const calls = [], env = auditEnv(db);
+  globalThis.fetch = async (url, init) => {
+    calls.push({ method: String(url).split("/").pop(), payload: JSON.parse(init.body) });
+    return telegramResponse({ message_id: 11 });
+  };
+  await processUpdate(languageCallback(11, "lang:en:0:10"), env);
+  await processUpdate({ message: userMessage(20, { text: "/forget confirm" }) }, env);
+  assert.equal(calls.at(-1).payload.text, t("en", "forgetDone"));
+  assert.deepEqual(calls.find((call) => call.method === "deleteMyCommands").payload.scope, { type: "chat", chat_id: 2 });
+  await processUpdate(languageCallback(11, "lang:en:0:10"), env);
+  await processUpdate(languageCallback(30, "lang:ja:0:10"), env);
+  await processUpdate({ message: userMessage(15, { text: "/language en" }) }, env);
+  let user = await db.prepare("SELECT * FROM users WHERE user_id = '2'").first();
+  assert.equal(user.language, null);
+  assert.equal(user.erased, 1);
+  await processUpdate({ message: userMessage(31, { text: "/language" }) }, env);
+  const data = calls.at(-1).payload.reply_markup.inline_keyboard[0].find((button) => button.text === "日本語").callback_data;
+  await processUpdate(languageCallback(32, data), env);
+  user = await db.prepare("SELECT * FROM users WHERE user_id = '2'").first();
+  assert.equal(user.language, "ja");
+  assert.equal(user.captcha_verified, 0);
+  assert.equal(user.erased, 0);
+}));
+
+test("語言寫入和清除併發時，舊選擇不能重新建立資料", () => withDatabaseMock(async (db) => {
+  const env = auditEnv(db), prepare = db.prepare.bind(db);
+  globalThis.fetch = async () => telegramResponse(true);
+  db.prepare = (sql) => {
+    const statement = prepare(sql);
+    if (sql.includes("INSERT INTO users(user_id, created_at, updated_at, language")) {
+      const run = statement.run.bind(statement);
+      statement.run = async () => {
+        await processUpdate({ message: userMessage(20, { text: "/forget confirm" }) }, env);
+        return run();
+      };
+    }
+    return statement;
+  };
+  await processUpdate(languageCallback(11, "lang:en:0:10"), env);
+  const user = await prepare("SELECT * FROM users WHERE user_id = '2'").first();
+  assert.equal(user.language, null);
+  assert.equal(user.erased, 1);
+  assert.equal(user.generation, 1);
+}));
+
+test("語言通知失敗後可重試，舊回調不能覆蓋較新選擇，同一鍵盤只選一次", () => withDatabaseMock(async (db) => {
+  const env = auditEnv(db), menus = [];
+  let fail = true;
+  globalThis.fetch = async (url, init) => {
+    const method = String(url).split("/").pop(), payload = JSON.parse(init.body);
+    if (method === "setMyCommands") menus.push(payload);
+    if (method === "sendMessage" && fail) { fail = false; return telegramResponse(null, 503); }
+    return telegramResponse(true);
+  };
+  const request = () => new Request("https://example.com/webhook", {
+    method: "POST", headers: { "X-Telegram-Bot-Api-Secret-Token": "test-secret" },
+    body: JSON.stringify({ update_id: 9400, ...languageCallback(11, "lang:en:0:10") })
+  });
+  assert.equal((await worker.fetch(request(), env)).status, 500);
+  await processUpdate(languageCallback(11, "lang:ja:0:10"), env);
+  assert.equal((await db.prepare("SELECT language FROM users WHERE user_id = '2'").first()).language, "en");
+  await processUpdate({ message: userMessage(30, { text: "/language ja" }) }, env);
+  assert.equal((await worker.fetch(request(), env)).status, 200);
+  assert.equal((await db.prepare("SELECT language FROM users WHERE user_id = '2'").first()).language, "ja");
+  assert.equal(menus.length, 2);
+  assert.equal(menus.at(-1).commands[0].description, t("ja", "userCommand_start"));
+}));
+
+test("用戶錯誤提示跟隨語言，自訂提示只覆蓋部署語言，封鎖不會被切語言解除", () => withDatabaseMock(async (db) => {
+  seedAuditUser(db);
+  db.database.exec("UPDATE users SET language = 'en', captcha_verified = 1");
+  const env = { ...auditEnv(db), BLOCKED_MESSAGE: "自訂封鎖", RATE_LIMIT_MESSAGE: "自訂限流", UNSUPPORTED_MESSAGE: "自訂類型", MESSAGE_INTERVAL_SECONDS: "60" }, calls = [];
+  let failCopy = false;
+  globalThis.fetch = async (url, init) => {
+    const method = String(url).split("/").pop();
+    calls.push({ method, payload: JSON.parse(init.body) });
+    return failCopy && method === "copyMessage" ? telegramResponse(null, 400) : telegramResponse({ message_id: 700 });
+  };
+  await processUpdate({ message: userMessage(10, { text: "hello" }) }, env);
+  await processUpdate({ message: userMessage(11, { text: "hello again" }) }, env);
+  assert.equal(calls.at(-1).payload.text, t("en", "rateLimit"));
+  db.database.exec("UPDATE users SET blocked = 1");
+  await processUpdate({ message: userMessage(12, { text: "blocked" }) }, env);
+  assert.equal(calls.at(-1).payload.text, t("en", "blockedNotice"));
+  await processUpdate({ message: userMessage(13, { text: "/language ja" }) }, env);
+  assert.equal((await db.prepare("SELECT blocked FROM users").first()).blocked, 1);
+  db.database.exec("UPDATE users SET blocked = 0, last_message_at = 0, language = 'en'");
+  failCopy = true;
+  await assert.rejects(processUpdate({ message: userMessage(14, { text: "unsupported" }) }, env));
+  assert.equal(calls.at(-1).payload.text, t("en", "unsupportedMessage"));
+  assert.equal(calls.find((call) => call.method === "copyMessage").payload.message_id, 10);
+  assert.equal(calls.some((call) => call.payload.chat_id === "1"), false);
+}));
+
+test("管理者更新選單時補訂閱語言回調，保留 Webhook URL、更新類型及待處理訊息", () => withDatabaseMock(async (db) => {
+  const calls = [], webhook = { url: "https://example.test/webhook", allowed_updates: ["message", "edited_message"], max_connections: 10 };
+  globalThis.fetch = async (url, init) => {
+    const method = String(url).split("/").pop();
+    calls.push({ method, payload: JSON.parse(init.body) });
+    return telegramResponse(method === "getWebhookInfo" ? webhook : true);
+  };
+  const env = auditEnv(db);
+  await processUpdate({ message: adminMessage(10, "/start") }, env);
+  assert.deepEqual(calls.find((call) => call.method === "setWebhook").payload, {
+    url: webhook.url, secret_token: env.WEBHOOK_SECRET, allowed_updates: ["message", "edited_message", "callback_query"],
+    max_connections: 10, drop_pending_updates: false
+  });
+  calls.length = 0;
+  webhook.allowed_updates.push("callback_query");
+  await processUpdate({ message: adminMessage(11, "/start") }, env);
+  assert.equal(calls.some((call) => call.method === "setWebhook"), false);
+}));
+
 test("初始化寫入暫時失敗後，相簿可由下一次重試完成", () => withDatabaseMock(async (db) => {
   let copies = 0;
   globalThis.fetch = async (url) => {
@@ -483,6 +680,8 @@ test("ready 拒絕缺少新 migration 的 D1，套用後恢復", async () => {
     const request = () => new Request("https://example.com/ready");
     assert.equal((await worker.fetch(request(), auditEnv(db))).status, 503);
     db.database.exec(readFileSync(new URL("../migrations/0006_verification_pending_message.sql", import.meta.url), "utf8"));
+    assert.equal((await worker.fetch(request(), auditEnv(db))).status, 503);
+    db.database.exec(readFileSync(new URL("../migrations/0007_user_language.sql", import.meta.url), "utf8"));
     assert.equal((await worker.fetch(request(), auditEnv(db))).status, 200);
   } finally { db.close(); }
 });
@@ -505,7 +704,7 @@ test("管理者 /start 更新使用者選單，管理指令仍只對本人可見
   assert.deepEqual(menus[1].payload.commands.map((item) => item.command),
     ["help", "status", "user", "block", "unblock", "close"]);
   assert.deepEqual(menus[2].payload.scope, { type: "all_private_chats" });
-  assert.deepEqual(menus[2].payload.commands.map((item) => item.command), ["start", "help", "id", "forget"]);
+  assert.deepEqual(menus[2].payload.commands.map((item) => item.command), ["start", "help", "language", "id", "forget"]);
   calls.length = 0;
   await processUpdate({ message: {
     message_id: 2, chat: { id: 1, type: "private" },
@@ -1105,7 +1304,7 @@ test("Topic 資料卡暫時失敗後會沿用原 Topic 補送", () => withDataba
   assert.ok(user.topic_card_message_id > 0);
 }));
 
-test("三語使用者 /help 不轉送、不讀寫個人資料，也不反覆註冊選單", async () => {
+test("三語使用者 /help 只讀取一次語言偏好，不寫入、不轉送或反覆註冊選單", async () => {
   for (const language of ["zh", "ja", "en"]) {
     await withDatabaseMock(async (db) => {
       const calls = [];
@@ -1114,10 +1313,16 @@ test("三語使用者 /help 不轉送、不讀寫個人資料，也不反覆註�
         return telegramResponse(true);
       };
       const prepare = db.prepare.bind(db);
-      db.prepare = () => { throw new Error("/help must not access personal data"); };
+      let reads = 0;
+      db.prepare = (sql) => {
+        reads++;
+        assert.equal(sql, "SELECT * FROM users WHERE user_id = ?");
+        return prepare(sql);
+      };
       await processUpdate({ message: userMessage(2000, { text: "/help" }) },
         { ...auditEnv(db), BOT_LANGUAGE: language });
       db.prepare = prepare;
+      assert.equal(reads, 1);
       assert.equal(calls.length, 1);
       assert.equal(calls[0].method, "sendMessage");
       assert.equal(calls[0].payload.text, t(language, "userHelp"));
@@ -1129,7 +1334,7 @@ test("三語使用者 /help 不轉送、不讀寫個人資料，也不反覆註�
   }
 });
 
-test("使用者選單按部署語言註冊，只有管理者 /start 會更新", async () => {
+test("預設使用者選單按部署語言註冊，語言選項標示三語且管理指令不外洩", async () => {
   for (const language of ["zh", "ja", "en"]) {
     await withDatabaseMock(async (db) => {
       const calls = [];
@@ -1141,8 +1346,8 @@ test("使用者選單按部署語言註冊，只有管理者 /start 會更新", 
         { ...auditEnv(db), BOT_LANGUAGE: language });
       const menus = calls.filter((call) => call.method === "setMyCommands");
       const userMenu = menus.find((call) => call.payload.scope.type === "all_private_chats");
-      assert.deepEqual(userMenu.payload.commands, ["start", "help", "id", "forget"].map((command) => ({
-        command, description: t(language, `userCommand_${command}`)
+      assert.deepEqual(userMenu.payload.commands, ["start", "help", "language", "id", "forget"].map((command) => ({
+        command, description: command === "language" ? "中文 / English / 日本語" : t(language, `userCommand_${command}`)
       })));
       assert.equal(menus.filter((call) => call.payload.commands.some((item) => item.command === "block"))
         .every((call) => call.payload.scope.user_id === 1 || call.payload.scope.chat_id === "1"), true);

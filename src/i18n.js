@@ -3,11 +3,13 @@ const messages = {
     adminReadyTopic: "話題模式。\n請在對應使用者的話題內回覆；傳送 /help 查看指令。",
     adminReadyDirect: "管理者私訊模式。\n請回覆 Bot 轉來的使用者訊息；傳送 /help 查看指令。",
     blockedNotice: "目前無法接收你的訊息。",
-    welcome: "請在此傳送訊息。管理者可透過 Bot 回覆。\n傳送 /help 查看使用說明。",
+    welcome: "請在此傳送訊息。管理者可透過 Bot 回覆。\n傳送 /help 查看使用說明，/language 切換語言。",
+    languageSaved: "已切換為中文。傳送 /language 可再次切換。",
     userHelp: `直接傳送文字或一般媒體，管理者可透過 Bot 回覆。首次聯絡可能需要算術驗證，以攔截自動化廣告；通過後會自動轉送第一則訊息。
 
 /start — 查看歡迎訊息
 /help — 查看使用說明
+/language — 切換語言
 /id — 查看自己的 User ID
 /forget — 查看資料清除說明；不會立即清除資料`,
     userCommand_start: "查看歡迎訊息",
@@ -120,11 +122,13 @@ const messages = {
     adminReadyTopic: "トピックモードです。\nユーザーのトピックで返信してください。/help でコマンドを確認できます。",
     adminReadyDirect: "管理者個別チャットモードです。\n転送されたメッセージに返信してください。/help でコマンドを確認できます。",
     blockedNotice: "現在、メッセージを受け付けられません。",
-    welcome: "ここにメッセージを送ってください。管理者はこのチャットに返信できます。\n/help で使い方を確認できます。",
+    welcome: "ここにメッセージを送ってください。管理者はこのチャットに返信できます。\n/help で使い方を確認、/language で言語を変更できます。",
+    languageSaved: "日本語に変更しました。/language で再び変更できます。",
     userHelp: `テキストや一般的なメディアを送信すると、管理者が Bot を通して返信できます。自動広告を防ぐため、初回は計算による確認が必要な場合があります。確認後、最初のメッセージを自動転送します。
 
 /start — 開始時のメッセージを表示
 /help — 使い方を表示
+/language — 言語を変更
 /id — 自分の User ID を表示
 /forget — データ消去の説明を表示（直ちには消去しません）`,
     userCommand_start: "開始時のメッセージを表示",
@@ -237,11 +241,13 @@ Bot との個別チャット：
     adminReadyTopic: "Topic mode.\nReply in the user's topic. Send /help for commands.",
     adminReadyDirect: "Admin private-chat mode.\nReply to a message relayed by the bot. Send /help for commands.",
     blockedNotice: "This bot is not accepting your messages right now.",
-    welcome: "Send a message here. The admin can reply in this chat.\nSend /help for instructions.",
+    welcome: "Send a message here. The admin can reply in this chat.\nSend /help for instructions or /language to change language.",
+    languageSaved: "Language set to English. Use /language to change it again.",
     userHelp: `Send text or standard media here. The admin can reply through the bot. First contact may require an arithmetic check to reduce automated ads. Your first message is relayed automatically after passing.
 
 /start — Show the welcome message
 /help — Show instructions
+/language — Change language
 /id — Show your User ID
 /forget — Show erasure instructions; does not erase data immediately`,
     userCommand_start: "Show the welcome message",

@@ -16,13 +16,13 @@ Version: v1.3.1 · License: [GPL-3.0-only](LICENSE)
 
 > 我沒有程式經驗。請閱讀 README，直接帶我部署這個 Telegram 私訊轉送 Bot。由你處理檔案、命令、本機設定與驗證；我只做登入、BotFather、授權及安全輸入。每次說明我需要做的一個操作，確認結果後繼續。
 >
-> 先檢查作業系統、Node.js 24 以上、pnpm、Windows 的 PowerShell 7，以及 Cloudflare／Telegram 準備狀態。只問缺少的選項：新建或沿用部署、固定語言 `zh`／`ja`／`en`、話題模式或管理者私訊模式。歡迎、封鎖、節流、無法轉送提示，以及訊息間隔和清理排程可自訂；未指定就用安全預設。缺少工具時先引導我安裝。
+> 先檢查作業系統、Node.js 24 以上、pnpm、Windows 的 PowerShell 7，以及 Cloudflare／Telegram 準備狀態。只問缺少的選項：新建或沿用部署、管理端及預設語言 `zh`／`ja`／`en`、話題模式或管理者私訊模式。歡迎、封鎖、節流、無法轉送提示，以及訊息間隔和清理排程可自訂；未指定就用安全預設。缺少工具時先引導我安裝。
 >
 > 使用我的 Worker、D1 和 Bot，透過 `tools/` 安全取得管理者與群組 ID。依下方流程完成依賴、測試、`wrangler.jsonc`、`vars.BOT_LANGUAGE`、資料庫遷移、Secrets／Variables 和 Worker 部署。新部署確認 `/ready` 成功後才註冊 Webhook；既有部署先辨識資源、備份 D1，再沿用原設定和憑證。
 >
 > 遵守下方公開內容規則。Token 僅透過本機安全輸入或 Secret 欄位處理，不放入聊天、輸出或 Git；私有資料留在受 Git 忽略的位置。未經我要求，不覆寫既有設定、重建資源、輪替憑證、刪除還原備份、改寫程式、推送 GitHub 或建立 Release／tag。
 >
-> 首次聯絡的算術驗證預設開啟，除非我要求才關閉。升級時先套用所有待執行的資料庫遷移，並用測試帳號確認 `/start` 只顯示歡迎、首則內容才出題，通過後自動轉送。
+> 首次聯絡的算術驗證預設開啟，除非我要求才關閉。升級時先套用所有待執行的資料庫遷移，並用測試帳號確認 `/start` 顯示歡迎與語言按鈕、`/language` 可切換並保存三語偏好、首則內容才出題，通過後自動轉送。
 >
 > 最後檢查 `/health`、`/ready`、Webhook 和安全探針，指導我用非管理者帳號完成私訊往返測試。管理者私訊 `/start` 設定選單，再用 `/status` 確認；清除功能只用測試帳號。遇到阻礙時說明原因及下一個操作，不把未驗證項目當作完成。交付 Bot 連結、Worker 網址、模式、語言、驗證結果與憑證保管位置，不顯示秘密值。
 
@@ -44,7 +44,7 @@ if (-not (Test-Path -LiteralPath wrangler.jsonc)) {
 }
 ```
 
-先在 `wrangler.jsonc` 設定自己的 Worker 名稱、D1 名稱及 `vars.BOT_LANGUAGE`（`zh`、`ja` 或 `en`，預設 `zh`）。每個部署固定一種語言，不依使用者的 Telegram 語言切換；不同語言實例使用各自的 Worker、D1、Bot 和 話題管理群組，不共用同一 Bot 的 Webhook。
+先在 `wrangler.jsonc` 設定自己的 Worker 名稱、D1 名稱及 `vars.BOT_LANGUAGE`（`zh`、`ja` 或 `en`，預設 `zh`）。這是管理端及尚未選擇語言的使用者所用語言；使用者可在同一 Bot 內自行切換三語，不會改變管理端語言，也不會翻譯聊天內容。
 
 新 Bot 尚未註冊 Webhook 時，先用自己的 Telegram 帳號私訊該 Bot 傳送 `/id`，再執行 `./tools/Get-TelegramUserId.ps1` 取得並確認自己的數字 `ADMIN_USER_ID`。腳本隱藏輸入 Bot Token、不保存它；若顯示多個候選 ID，請確認哪個帳號是自己。已有 Webhook 的部署則從現有設定取得 ID，不要用 [getUpdates](https://core.telegram.org/bots/api#getupdates)。
 
@@ -84,7 +84,7 @@ Cloudflare API Token 需要該帳戶的 Workers Scripts Edit 和 D1 Edit 權限�
 | `MESSAGE_INTERVAL_SECONDS` | Text，可選 | 一般訊息間隔，預設 2 秒，範圍 0–60 |
 | `CAPTCHA_ENABLED` | Text，可選 | 算術驗證的初始預設，`true`／`false`，預設 `true`；Bot 內管理者設定優先 |
 
-未設定的提示訊息使用該語言的預設翻譯，自訂文字最多 4096 字元。[清理排程](https://developers.cloudflare.com/workers/configuration/cron-triggers/)在 `triggers.crons` 調整，採 UTC；範例 `17 3 * * *` 是每日 03:17 UTC，不是使用者本機時間。關閉排程也會停用定期清理。
+未設定的提示訊息使用對應語言的預設翻譯；自訂文字只覆蓋部署語言，最多 4096 字元，其他語言仍使用內建翻譯。[清理排程](https://developers.cloudflare.com/workers/configuration/cron-triggers/)在 `triggers.crons` 調整，採 UTC；範例 `17 3 * * *` 是每日 03:17 UTC，不是使用者本機時間。關閉排程也會停用定期清理。
 
 ```powershell
 if (-not (Test-Path -LiteralPath private-credentials/telegram-webhook-secret.dpapi)) {
@@ -110,6 +110,7 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 | 使用位置 | 指令 | 用途 |
 |---|---|---|
 | 使用者私訊 Bot | `/start`、`/help`、`/id` | 歡迎訊息、使用說明、自己的 User ID |
+| 使用者私訊 Bot | `/language` | 選擇中文、English、日本語；亦可用 `/language zh`、`/language en`、`/language ja` |
 | 使用者私訊 Bot | `/forget`、`/forget confirm` | 查看清除說明、確認清除資料 |
 | 管理者私訊 Bot | `/start`、`/help`、`/status` | 設定選單、查指令、查近 24 小時處理狀態與 Webhook 待處理數 |
 | 管理者私訊 Bot | `/unblock USER_ID` | 依 ID 解封，包括已清除資料的封鎖者 |
@@ -117,7 +118,9 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 | 管理群組的使用者話題 | `/user`、`/block`、`/unblock`、`/close`、`/help`、`/status` | 查資料、封鎖／解封、關閉話題、查指令／狀態 |
 | 管理者私訊模式，管理者回覆轉來的訊息 | `/user`、`/block`、`/unblock` | 操作該訊息所屬的使用者 |
 
-管理權限只認 `ADMIN_USER_ID`。管理者私訊 `/start` 更新使用者選單及本人可見的管理選單，切換模式後可再傳一次。使用者 `/help` 不會轉給管理者，也不讀寫個人資料；選單不會在每則訊息重設。
+管理權限只認 `ADMIN_USER_ID`。管理者私訊 `/start` 更新預設使用者選單及本人可見的管理選單，並為一般 HTTPS Webhook 補訂閱 `callback_query`；自訂憑證的 Webhook 須自行更新訂閱。選單不會在每則訊息重設。
+
+使用者 `/start` 的按鈕與 `/language` 都可選語言，偏好與個別指令選單會保存；`/help` 只讀取偏好，不寫入或轉送給管理者。未選擇時沿用部署預設，不依 Telegram 語言自動切換。正常聊天重用既有使用者查詢，不多讀寫 D1；只在主動切換時保存偏好。`/forget confirm` 也會清除偏好與個別選單。升級前須套用 `0007_user_language.sql`，管理者再私訊 `/start` 更新選單及按鈕訂閱。
 
 `/close` 只關閉話題，不封鎖使用者；新訊息會優先重開原話題，找不到話題才另建。要停止接收訊息請用 `/block`。管理者回覆失效對照、舊話題或錯誤位置時會收到「未送出」提示；話題無法發送提示時改私訊管理者。
 
@@ -125,7 +128,7 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 
 ### 首次聯絡驗證
 
-`/start` 保留原歡迎訊息，不出題也不免除驗證。新聯絡者傳第一則內容時，Bot 才說明為了攔截自動化廣告而要求算術驗證。5 分鐘內只回覆數字，除法都是整數；連錯 3 次暫停 15 分鐘。一般錯誤至少間隔 5 秒才計次及回覆；冷卻中的內容忽略。`/help`、`/id`、`/forget` 仍可使用。
+`/start` 顯示歡迎與語言按鈕，不出題也不免除驗證。新聯絡者傳第一則內容時，Bot 才說明為了攔截自動化廣告而要求算術驗證。5 分鐘內只回覆數字，除法都是整數；連錯 3 次暫停 15 分鐘。一般錯誤至少間隔 5 秒才計次及回覆；冷卻中的內容忽略。`/help`、`/language`、`/id`、`/forget` 仍可使用；切換語言不重置題目或錯誤次數。
 
 通過前只暫存第一則訊息的 Telegram ID；若是相簿，暫存同組最多 10 個 ID，不保存文字或媒體本體，也不建立話題。通過後自動轉送第一則內容或首組相簿，不必重送；答案與其他未驗證訊息不補送。題目過期或錯誤過多時清除待送紀錄，之後須重新傳送聯絡內容。暫存參照沿用原有相簿紀錄的清理週期。
 
@@ -137,7 +140,7 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 
 ### 資料與限制
 
-D1 保存路由所需的 User ID、顯示名稱／使用者名稱、話題／訊息 ID 與處理狀態，不保存訊息文字或媒體本體。管理端會看到使用者基本資料，這不是匿名服務；話題也不是獨立閱讀權限，管理群組只應加入可信任成員。
+D1 保存路由所需的 User ID、顯示名稱／使用者名稱、話題／訊息 ID、語言偏好與處理狀態，不保存訊息文字或媒體本體。管理端會看到使用者基本資料，這不是匿名服務；話題也不是獨立閱讀權限，管理群組只應加入可信任成員。
 
 使用者傳 `/forget` 會先看到確認說明，只有傳 `/forget confirm` 才清除 Bot 的 D1 個人資料、相簿暫存及轉送對照。為防止舊請求重建資料，Bot 暫留不含顯示名稱的控制紀錄；非封鎖者的紀錄會在 7 天後依排程清理。被封鎖者的 ID、封鎖狀態與控制紀錄仍保留，管理者可私訊 Bot 傳送 `/unblock USER_ID` 解封。這**不會刪除 Telegram 兩端已有的聊天訊息或既有備份**；之後的新訊息可能重新建立資料。`/status` 也顯示處理中與處理逾時，但不能替代真人收發測試。
 
@@ -180,13 +183,13 @@ Telegram の個別チャットを管理者へ転送し、Bot を通して返信�
 
 > プログラミングの経験がありません。README を読み、この Telegram 転送 Bot のデプロイを進めてください。ファイル、コマンド、ローカル設定、検証はあなたが担当し、私はログイン、BotFather、権限の承認、安全な入力だけ行います。必要な操作を一つずつ案内し、結果を確認してから次に進んでください。
 >
-> OS、Node.js 24 以降、pnpm、Windows なら PowerShell 7、Cloudflare／Telegram の準備状況を確認してください。未決定の項目だけ質問してください：新規か既存か、固定言語 `zh`／`ja`／`en`、トピックモードか管理者個別チャットモードか。開始時・ブロック時・送信頻度制限時・転送不可の案内、送信間隔、クリーンアップ時刻は任意で変更し、指定がなければ安全な既定値を使ってください。不足するツールは導入を案内してください。
+> OS、Node.js 24 以降、pnpm、Windows なら PowerShell 7、Cloudflare／Telegram の準備状況を確認してください。未決定の項目だけ質問してください：新規か既存か、管理側と既定の言語 `zh`／`ja`／`en`、トピックモードか管理者個別チャットモードか。開始時・ブロック時・送信頻度制限時・転送不可の案内、送信間隔、クリーンアップ時刻は任意で変更し、指定がなければ安全な既定値を使ってください。不足するツールは導入を案内してください。
 >
 > 私の Worker、D1、Bot を使い、`tools/` で管理者／グループ ID を安全に取得してください。下の手順で依存関係、テスト、`wrangler.jsonc`、`vars.BOT_LANGUAGE`、データベース移行、Secrets／Variables、Worker のデプロイを進めてください。新規なら `/ready` の成功後に Webhook を登録してください。既存なら対象のリソースを確認して D1 をバックアップし、元の設定と認証情報を使ってください。
 >
 > 下の公開ルールを守り、Token はローカルの安全な入力か Secret 欄だけで扱い、チャット・出力・Git に含めないでください。私有データは Git の対象外に置きます。依頼なしに既存設定の上書き、リソースの再作成、認証情報の更新、復旧用バックアップの削除、コード変更、GitHub への push、Release／tag の作成をしないでください。
 >
-> 初回の計算確認は既定で有効にし、私が依頼した場合だけ無効にしてください。未適用のデータベース移行を先に適用し、テストアカウントで `/start` は案内のみ、最初の内容で問題を表示し、確認後に自動転送することを確認してください。
+> 初回の計算確認は既定で有効にし、私が依頼した場合だけ無効にしてください。未適用のデータベース移行を先に適用し、テストアカウントで `/start` の案内と言語ボタン、`/language` による3言語の選択と保存、最初の内容での問題表示、確認後の自動転送を試してください。
 >
 > 最後に `/health`、`/ready`、Webhook、安全なプローブを確認し、管理者以外のアカウントで送信と返信を試せるよう案内してください。管理者には Bot との個別チャットで `/start` と `/status` を使ってもらい、消去機能はテスト用アカウントだけで確認してください。止まったら理由と次の操作を説明し、未確認の項目を完了扱いにしないでください。Bot のリンク、Worker URL、モード、言語、検証結果、認証情報の保管場所をまとめ、秘密の値は表示しないでください。
 
@@ -208,7 +211,7 @@ if (-not (Test-Path -LiteralPath wrangler.jsonc)) {
 }
 ```
 
-`wrangler.jsonc` に自分の Worker 名、D1 名、`vars.BOT_LANGUAGE`（`zh`、`ja`、`en`。既定は `zh`）を設定します。言語はデプロイごとに固定し、Telegram ユーザーの言語では切り替えません。言語別のインスタンスでは別々の Worker、D1、Bot、トピック管理グループを使用し、同じ Bot の Webhook を共有しません。
+`wrangler.jsonc` に自分の Worker 名、D1 名、`vars.BOT_LANGUAGE`（`zh`、`ja`、`en`。既定は `zh`）を設定します。管理側と未選択ユーザーの言語です。ユーザーは同じ Bot 内で3言語を選べます。管理側の言語や会話の本文は変更しません。
 
 新しい Bot で Webhook を登録する前に、自分の Telegram アカウントから Bot に `/id` を個別チャットし、`./tools/Get-TelegramUserId.ps1` を実行して自分の数字の `ADMIN_USER_ID` を確認します。Bot Token の入力は非表示で、保存されません。候補が複数ある場合は自分のアカウントを確認してください。すでに Webhook がある場合は既存の設定から ID を取得し、[getUpdates](https://core.telegram.org/bots/api#getupdates) は使用しません。
 
@@ -248,7 +251,7 @@ Cloudflare Worker の Variables and Secrets に次を設定します。
 | `MESSAGE_INTERVAL_SECONDS` | Text、省略可 | 通常メッセージの間隔。既定は 2 秒、範囲は 0–60 |
 | `CAPTCHA_ENABLED` | Text、省略可 | 計算確認の初期設定。`true`／`false`、既定は `true`。Bot 内の管理者設定が優先 |
 
-案内文を設定しなければその言語の既定の翻訳を使い、カスタム文は最大 4096 文字です。[クリーンアップのスケジュール](https://developers.cloudflare.com/workers/configuration/cron-triggers/)は `triggers.crons` で変更し、時刻は UTC です。例の `17 3 * * *` は毎日 03:17 UTC で、ユーザーの現地時刻ではありません。スケジュールを無効にすると定期クリーンアップも停止します。
+未設定の案内は対応する言語の既定の翻訳を使います。カスタム文はデプロイ言語だけに適用し、最大 4096 文字です。他言語には組み込みの翻訳を使います。[クリーンアップのスケジュール](https://developers.cloudflare.com/workers/configuration/cron-triggers/)は `triggers.crons` で変更し、時刻は UTC です。例の `17 3 * * *` は毎日 03:17 UTC で、ユーザーの現地時刻ではありません。スケジュールを無効にすると定期クリーンアップも停止します。
 
 ```powershell
 if (-not (Test-Path -LiteralPath private-credentials/telegram-webhook-secret.dpapi)) {
@@ -274,6 +277,7 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 | 使用場所 | コマンド | 用途 |
 |---|---|---|
 | Bot との個別チャット（ユーザー） | `/start`、`/help`、`/id` | 開始時のメッセージ、使い方、自分の User ID |
+| Bot との個別チャット（ユーザー） | `/language` | 中文・English・日本語を選択。`/language zh`、`/language en`、`/language ja` でも指定可 |
 | Bot との個別チャット（ユーザー） | `/forget`、`/forget confirm` | 消去の説明、消去の確認 |
 | Bot との個別チャット（管理者） | `/start`、`/help`、`/status` | メニュー設定、コマンド案内、過去24時間の処理状況と Webhook 保留件数 |
 | Bot との個別チャット（管理者） | `/unblock USER_ID` | ID による解除。消去済みのブロックユーザーも対象 |
@@ -281,7 +285,9 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 | 管理グループのユーザートピック | `/user`、`/block`、`/unblock`、`/close`、`/help`、`/status` | 情報表示、ブロック／解除、トピックを閉じる、案内／状況確認 |
 | 管理者個別チャットモードで転送メッセージへの管理者の返信 | `/user`、`/block`、`/unblock` | そのメッセージのユーザーを操作 |
 
-管理権限は `ADMIN_USER_ID` だけで判定します。管理者が `/start` を個別チャットすると、ユーザー用メニューと本人専用の管理メニューを更新します。モード変更後は再実行できます。ユーザーの `/help` は管理者へ転送せず、個人情報を読み書きしません。メニューはメッセージごとに設定し直しません。
+管理権限は `ADMIN_USER_ID` だけで判定します。管理者が `/start` を個別チャットすると、既定のユーザー用メニューと本人専用の管理メニューを更新し、通常の HTTPS Webhook に `callback_query` を追加します。独自の証明書を使う Webhook は手動で更新してください。メニューはメッセージごとに設定し直しません。
+
+ユーザーは `/start` のボタンか `/language` で言語を選び、設定と個別コマンドメニューを保存できます。`/help` は設定を読むだけで、書き込みや管理者への転送は行いません。未選択時はデプロイの既定値を使い、Telegram の言語では自動切り替えしません。通常の会話は既存のユーザー照会を使い、D1 の追加読み書きはありません。`/forget confirm` は言語と個別メニューも消去します。更新前に `0007_user_language.sql` を適用し、管理者が `/start` を個別送信してメニューとボタンの受信設定を更新してください。
 
 `/close` はトピックを閉じるだけで、ユーザーをブロックしません。新着時は元のトピックを再開し、見つからない場合にのみ新規作成します。受信を止めるには `/block` を使ってください。失効した対応情報、古いトピック、誤った場所への管理者の返信には未送信の案内を返します。トピックに案内を送れない場合は管理者へ個別送信します。
 
@@ -289,7 +295,7 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 
 ### 初回の確認
 
-`/start` は元の案内だけを表示し、問題は出さず確認も免除しません。新しい連絡者が最初の内容を送ると、自動広告を防ぐための計算確認を案内します。5分以内に数字だけで答え、割り算は割り切れます。3回間違えると15分間待ちます。誤答への応答と計数は最低5秒間隔で、待機中の内容は無視します。`/help`、`/id`、`/forget` は引き続き使えます。
+`/start` は案内と言語ボタンを表示し、問題は出さず確認も免除しません。新しい連絡者が最初の内容を送ると、自動広告を防ぐための計算確認を案内します。5分以内に数字だけで答え、割り算は割り切れます。3回間違えると15分間待ちます。誤答への応答と計数は最低5秒間隔で、待機中の内容は無視します。`/help`、`/language`、`/id`、`/forget` は引き続き使えます。言語変更で問題や誤答回数はリセットされません。
 
 確認前は最初のメッセージの Telegram ID、アルバムなら同じ組の最大10件の ID のみ一時保存します。本文やメディア本体は保存せず、トピックも作りません。確認後に最初の内容またはアルバムを自動転送するため、再送は不要です。答えや他の未確認メッセージは転送しません。期限切れや誤答上限では待機記録を消し、連絡内容の再送が必要です。一時参照は既存のアルバム記録の定期処理で削除します。
 
@@ -301,7 +307,7 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 
 ### データと制限
 
-D1 には転送に必要な User ID、表示名／ユーザー名、トピック／メッセージ ID、処理状況を保存し、本文やメディア本体は保存しません。管理側にはユーザーの基本情報が表示され、匿名サービスではありません。トピックは独立した閲覧権限でもないため、管理グループには信頼できるメンバーだけを招待してください。
+D1 には転送に必要な User ID、表示名／ユーザー名、トピック／メッセージ ID、言語設定、処理状況を保存し、本文やメディア本体は保存しません。管理側にはユーザーの基本情報が表示され、匿名サービスではありません。トピックは独立した閲覧権限でもないため、管理グループには信頼できるメンバーだけを招待してください。
 
 ユーザーが `/forget` を送ると確認方法が表示され、`/forget confirm` を送った場合にのみ Bot の D1 に保存された個人情報、アルバムの一時データ、メッセージの対応情報が消去されます。表示名を含まない再作成防止の記録を一時保持し、ブロックされていないユーザーの記録は7日後の定期処理で削除します。ブロック中の ID、ブロック状態、記録は残り、管理者は Bot との個別チャットで `/unblock USER_ID` を送って解除できます。**Telegram の既存メッセージとバックアップは削除されません**。以後の新しいメッセージは情報を再作成する場合があります。`/status` は処理中と処理期限切れも表示しますが、実際の送受信テストの代わりにはなりません。
 
@@ -344,13 +350,13 @@ Give the repository link and this prompt to an AI coding assistant that can read
 
 > I have no coding experience. Read the README and deploy this Telegram private-message relay bot with me. Handle files, commands, local configuration, and verification. I will handle sign-in, BotFather, permissions, and secure input. Give me one action at a time, check its result, and continue.
 >
-> Check my OS, Node.js 24 or newer, pnpm, PowerShell 7 on Windows, and Cloudflare/Telegram setup. Ask only for missing choices: new or existing deployment, fixed language `zh`/`ja`/`en`, and topic mode or admin private-chat mode. Offer optional welcome, blocked-user, rate-limit, and unsupported-message notices, a message interval, and a cleanup schedule; otherwise use safe defaults. Help me install any missing tools.
+> Check my OS, Node.js 24 or newer, pnpm, PowerShell 7 on Windows, and Cloudflare/Telegram setup. Ask only for missing choices: new or existing deployment, admin and default language `zh`/`ja`/`en`, and topic mode or admin private-chat mode. Offer optional welcome, blocked-user, rate-limit, and unsupported-message notices, a message interval, and a cleanup schedule; otherwise use safe defaults. Help me install any missing tools.
 >
 > Use my Worker, D1, and bot, and obtain my numeric admin/group IDs safely with `tools/`. Follow the steps below for dependencies, tests, `wrangler.jsonc`, `vars.BOT_LANGUAGE`, database migrations, Secrets/Variables, and Worker deployment. For a new deployment, confirm `/ready` before registering the webhook. For an existing deployment, identify its resources, back up D1, and reuse its settings and credentials.
 >
 > Follow the public-content rules below. Handle tokens only through secure local input or Secret fields, never chat, output, or Git; keep private data in Git-ignored locations. Without my request, do not overwrite existing settings, recreate resources, rotate credentials, delete recovery backups, change source code, push to GitHub, or create a Release/tag.
 >
-> Keep the first-contact arithmetic check enabled unless I request otherwise. Apply all pending database migrations before upgrading. With a test account, verify that `/start` only welcomes, the first contact message triggers the check, and passing automatically relays that message.
+> Keep the first-contact arithmetic check enabled unless I request otherwise. Apply all pending database migrations before upgrading. With a test account, verify the welcome and language buttons on `/start`, three saved language choices via `/language`, the check on the first contact message, and automatic relay after passing.
 >
 > Verify `/health`, `/ready`, webhook status, and the safe runtime probe, then guide me through a real send-and-reply test with a non-admin account. Have the admin send `/start` and `/status` privately to the bot; use only test accounts for erasure. If blocked, explain why and give my next action; do not report unverified work as complete. Finish with the bot link, Worker URL, mode, language, checks, and credential storage location, without secret values.
 
@@ -372,7 +378,7 @@ if (-not (Test-Path -LiteralPath wrangler.jsonc)) {
 }
 ```
 
-Set your Worker and D1 names and `vars.BOT_LANGUAGE` (`zh`, `ja`, or `en`; default `zh`) in `wrangler.jsonc`. The language is fixed per deployment, not selected from a user's Telegram settings. Use separate Workers, D1 databases, Bots, and topic-mode admin groups for separate language instances; do not share one Bot's webhook across them.
+Set your Worker and D1 names and `vars.BOT_LANGUAGE` (`zh`, `ja`, or `en`; default `zh`) in `wrangler.jsonc`. This sets the admin language and the default for users who have not chosen one. Users can choose any of the three languages in the same bot; the admin language and conversation content remain unchanged.
 
 For a new Bot, before registering its webhook, send `/id` in a private chat with it from your own Telegram account. Run `./tools/Get-TelegramUserId.ps1` and confirm your numeric `ADMIN_USER_ID`. The script hides the bot Token input and does not save it; if multiple IDs appear, identify your own account. For a deployment with an existing webhook, get the ID from its current configuration instead of using [getUpdates](https://core.telegram.org/bots/api#getupdates).
 
@@ -412,7 +418,7 @@ Set these under the Worker's Variables and Secrets in Cloudflare:
 | `MESSAGE_INTERVAL_SECONDS` | Text, optional | Minimum interval for ordinary messages; default 2 seconds, range 0–60 |
 | `CAPTCHA_ENABLED` | Text, optional | Initial arithmetic-check default: `true` / `false`, default `true`; the admin's in-bot setting takes precedence |
 
-Unset notices use that language's defaults; custom text is limited to 4096 characters. Change the [cleanup schedule](https://developers.cloudflare.com/workers/configuration/cron-triggers/) under `triggers.crons`, using UTC: the example `17 3 * * *` means daily at 03:17 UTC, not the user's local time. Disabling the schedule also disables periodic cleanup.
+Unset notices use the matching language's defaults. Custom text applies only to the deployment language and is limited to 4096 characters; other languages use built-in translations. Change the [cleanup schedule](https://developers.cloudflare.com/workers/configuration/cron-triggers/) under `triggers.crons`, using UTC: the example `17 3 * * *` means daily at 03:17 UTC, not the user's local time. Disabling the schedule also disables periodic cleanup.
 
 ```powershell
 if (-not (Test-Path -LiteralPath private-credentials/telegram-webhook-secret.dpapi)) {
@@ -438,6 +444,7 @@ Users message the bot privately. The admin replies in the matching topic or, in 
 | Where | Commands | Purpose |
 |---|---|---|
 | User's private chat with the bot | `/start`, `/help`, `/id` | Welcome message, instructions, own User ID |
+| User's private chat with the bot | `/language` | Choose 中文, English, or 日本語; also accepts `/language zh`, `/language en`, `/language ja` |
 | User's private chat with the bot | `/forget`, `/forget confirm` | Erasure instructions, confirmed erasure |
 | Admin's private chat with the bot | `/start`, `/help`, `/status` | Set command menu, show help, see 24-hour processing and webhook pending count |
 | Admin's private chat with the bot | `/unblock USER_ID` | Unblock by ID, including blocked users who erased their data |
@@ -445,7 +452,9 @@ Users message the bot privately. The admin replies in the matching topic or, in 
 | User topic in the admin group | `/user`, `/block`, `/unblock`, `/close`, `/help`, `/status` | User details, block/unblock, close topic, help/status |
 | Admin private-chat mode: reply to a relayed message | `/user`, `/block`, `/unblock` | Act on the user belonging to that message |
 
-Only `ADMIN_USER_ID` grants admin access. The admin sends `/start` privately to refresh the user menu and their private admin menus; repeat after switching modes. A user's `/help` is not relayed and does not read or write personal data. Menus are not reset on every message.
+Only `ADMIN_USER_ID` grants admin access. The admin sends `/start` privately to refresh the default user menu and their private admin menus, and subscribe standard HTTPS webhooks to `callback_query`. Webhooks with a custom certificate need a manual subscription update. Menus are not reset on every message.
+
+Users can choose a language through the `/start` buttons or `/language`; their preference and private command menu are saved. `/help` only reads the preference, without writes or relaying to the admin. Users without a choice use the deployment default, regardless of Telegram language. Normal chat reuses existing user queries with no extra D1 reads or writes; preferences are saved only on explicit selection. `/forget confirm` also clears the preference and private menu. Apply `0007_user_language.sql` before upgrading, then have the admin send `/start` privately to refresh menus and button subscriptions.
 
 `/close` closes a topic without blocking the user. New messages reopen the original topic; a new topic is created only if the old one cannot be found. Use `/block` to stop accepting messages. Admin replies with expired mappings, in old topics, or in the wrong place receive a not-sent notice. If the topic cannot receive that notice, it is sent privately to the admin.
 
@@ -453,7 +462,7 @@ Only `ADMIN_USER_ID` grants admin access. The admin sends `/start` privately to 
 
 ### First-contact check
 
-`/start` keeps the original welcome, without a question or a verification exemption. A new contact's first content message triggers an arithmetic check explaining that it reduces automated ads. Reply with digits only within 5 minutes; division always has an integer answer. Three wrong answers require a 15-minute wait. Wrong attempts and responses are spaced at least 5 seconds apart, and content during the cooldown is ignored. `/help`, `/id`, and `/forget` remain available.
+`/start` shows the welcome and language buttons, without a question or a verification exemption. A new contact's first content message triggers an arithmetic check explaining that it reduces automated ads. Reply with digits only within 5 minutes; division always has an integer answer. Three wrong answers require a 15-minute wait. Wrong attempts and responses are spaced at least 5 seconds apart, and content during the cooldown is ignored. `/help`, `/language`, `/id`, and `/forget` remain available; changing language does not reset the question or wrong attempts.
 
 Before passing, only the first message's Telegram ID is staged, or up to 10 IDs belonging to the first album. No text or media content is stored and no topic is created. Passing automatically relays that first message or album, without resending. Answers and other unverified messages are not replayed. Expiry or too many wrong answers clears the pending references, requiring a new contact message. Temporary references use the existing album cleanup cycle.
 
@@ -465,7 +474,7 @@ This reduces simple automated ads; programs that solve arithmetic and people can
 
 ### Data and limits
 
-D1 stores routing-related User IDs, display names/usernames, topic/message IDs, and processing state, not message text or media content. The admin sees basic user information; this is not an anonymous service. Topics are not separate read-access boundaries, so invite only trusted members to the admin group.
+D1 stores routing-related User IDs, display names/usernames, topic/message IDs, language preferences, and processing state, not message text or media content. The admin sees basic user information; this is not an anonymous service. Topics are not separate read-access boundaries, so invite only trusted members to the admin group.
 
 Sending `/forget` shows confirmation instructions; only `/forget confirm` erases personal data, album staging, and relay mappings stored in the bot's D1. Records without display names prevent old requests from restoring data; unblocked users' records are removed by scheduled cleanup after 7 days. Blocked IDs, blocked state, and their records remain; the admin can send `/unblock USER_ID` in their private chat with the bot. This **does not delete existing Telegram messages or backups**. Later new messages may create data again. `/status` also shows processing updates and timeouts, but is not a substitute for a real two-way delivery test.
 

@@ -11,6 +11,7 @@ const CONVERSATION_WINDOW_SECONDS = 6 * 60 * 60;
 const TELEGRAM_TIMEOUT_MS = 15_000;
 const CAPTCHA_TTL_SECONDS = 300;
 const CAPTCHA_COOLDOWN_SECONDS = 900;
+const USER_LANGUAGES = { zh: "中文", en: "English", ja: "日本語" };
 let botIdentity;
 
 export default {
@@ -119,6 +120,7 @@ export async function processUpdate(update, env) {
   const message = update.message || update.edited_message;
   if (message && !(await commandIsForBot(message.text, env))) return;
   try {
+    if (update.callback_query) return await processLanguageCallback(update.callback_query, env);
     if (update.message) return await processMessage(update.message, env);
     if (update.edited_message) return await processEditedMessage(update.edited_message, env);
   } catch (error) {
@@ -232,8 +234,20 @@ async function configureAdminMenu(env) {
     }
     await telegram(env, "setMyCommands", {
       scope: { type: "all_private_chats" },
-      commands: commands(["start", "help", "id", "forget"], "userCommand_")
+      commands: userCommands(language)
     });
+    // Existing webhooks may subscribe only to messages. Keep their URL and pending updates.
+    const webhook = await telegram(env, "getWebhookInfo", {});
+    if (webhook.url && !webhook.has_custom_certificate && webhook.allowed_updates?.length
+      && !webhook.allowed_updates.includes("callback_query")) {
+      await telegram(env, "setWebhook", {
+        url: webhook.url,
+        secret_token: env.WEBHOOK_SECRET,
+        allowed_updates: [...webhook.allowed_updates, "callback_query"],
+        max_connections: webhook.max_connections,
+        drop_pending_updates: false
+      });
+    }
   } catch (error) {
     console.log(JSON.stringify({ event: "admin_menu_setup_failed", error: sanitizeError(error) }));
   }
@@ -311,24 +325,45 @@ function summarizeFailure(error, language) {
 
 async function processUserMessage(message, env) {
   const command = parseCommand(message.text);
-  if (command === "help" || command === "id") {
-    await telegram(env, "sendMessage", {
-      chat_id: message.chat.id,
-      text: command === "help" ? t(env.BOT_LANGUAGE, "userHelp")
-        : `${t(env.BOT_LANGUAGE, "userId")}${t(env.BOT_LANGUAGE, "fieldSeparator")}${message.from.id}`
-    });
-    return;
-  }
   const now = Math.floor(Date.now() / 1000);
   const userId = String(message.from.id);
   let user = await getUser(env.BOT_DB, userId);
-
-  if (command === "forget") {
-    const confirmed = /^\/forget(?:@[A-Za-z0-9_]+)?\s+confirm\s*$/i.test(message.text.trim());
-    if (confirmed) await forgetUser(env.BOT_DB, userId, message.message_id, now);
+  env = { ...env, _userLanguage: user?.language || env.BOT_LANGUAGE || "zh" };
+  if (command === "help" || command === "id") {
     await telegram(env, "sendMessage", {
       chat_id: message.chat.id,
-      text: t(env.BOT_LANGUAGE, confirmed ? "forgetDone" : "forgetConfirm")
+      text: command === "help" ? userText(env, "userHelp")
+        : `${userText(env, "userId")}${userText(env, "fieldSeparator")}${message.from.id}`
+    });
+    return;
+  }
+  if (command === "forget") {
+    const confirmed = /^\/forget(?:@[A-Za-z0-9_]+)?\s+confirm\s*$/i.test(message.text.trim());
+    if (confirmed) {
+      await forgetUser(env.BOT_DB, userId, message.message_id, now);
+      const current = await getUser(env.BOT_DB, userId);
+      if (!current?.language && current?.forgotten_message_id === message.message_id) {
+        await telegram(env, "deleteMyCommands", { scope: { type: "chat", chat_id: message.chat.id } });
+      }
+    }
+    await telegram(env, "sendMessage", {
+      chat_id: message.chat.id,
+      text: userText(env, confirmed ? "forgetDone" : "forgetConfirm")
+    });
+    return;
+  }
+
+  if (message.message_id <= (user?.forgotten_message_id || 0)) return;
+  if (command === "language") {
+    const selected = /^\/language(?:@[A-Za-z0-9_]+)?\s+(zh|en|ja)\s*$/i.exec(message.text.trim())?.[1].toLowerCase();
+    if (selected) {
+      return saveUserLanguage(message.chat.id, selected, message.message_id, message.message_id,
+        user?.generation || 0, env);
+    }
+    await telegram(env, "sendMessage", {
+      chat_id: message.chat.id,
+      text: "選擇語言 / Choose a language / 言語を選択",
+      reply_markup: languageKeyboard(message, user)
     });
     return;
   }
@@ -338,7 +373,7 @@ async function processUserMessage(message, env) {
       try {
         await telegram(env, "sendMessage", {
           chat_id: message.chat.id,
-          text: env.BLOCKED_MESSAGE || t(env.BOT_LANGUAGE, "blockedNotice")
+          text: userText(env, "blockedNotice", "BLOCKED_MESSAGE")
         });
       } catch (error) {
         await releaseBlockedNotice(env.BOT_DB, userId, now).catch(() => {});
@@ -352,7 +387,8 @@ async function processUserMessage(message, env) {
   if (command === "start") {
     await telegram(env, "sendMessage", {
       chat_id: message.chat.id,
-      text: env.WELCOME_MESSAGE || t(env.BOT_LANGUAGE, "welcome")
+      text: userText(env, "welcome", "WELCOME_MESSAGE"),
+      reply_markup: languageKeyboard(message, user)
     });
     return;
   }
@@ -367,7 +403,7 @@ async function processUserMessage(message, env) {
   if (user?.captcha_message_id >= message.message_id && !(firstAlbum
     && firstAlbum.user_generation === user.generation && firstAlbum.state !== "rejected")) {
     if (user.captcha_verified && user.captcha_message_id === message.message_id) {
-      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: t(env.BOT_LANGUAGE, "captchaPassed") });
+      await telegram(env, "sendMessage", { chat_id: message.chat.id, text: userText(env, "captchaPassed") });
     } else if (needsCaptcha) await processCaptcha(message, user, env, now);
     return;
   }
@@ -443,6 +479,64 @@ async function processUserMessage(message, env) {
   await saveCopiedMessage(env, user, message, copied, env.ADMIN_GROUP_ID, now);
 }
 
+function userText(env, key, override) {
+  const language = env._userLanguage || env.BOT_LANGUAGE || "zh";
+  return (override && language === (env.BOT_LANGUAGE || "zh") && env[override]) || t(language, key);
+}
+
+function userCommands(language) {
+  return ["start", "help", "language", "id", "forget"].map((command) => ({
+    command,
+    description: command === "language" ? "中文 / English / 日本語" : t(language, `userCommand_${command}`)
+  }));
+}
+
+function languageKeyboard(message, user) {
+  return { inline_keyboard: [Object.entries(USER_LANGUAGES).map(([language, text]) => ({
+    text, callback_data: `lang:${language}:${user?.generation || 0}:${message.message_id}`
+  }))] };
+}
+
+async function saveUserLanguage(chatId, language, messageId, originId, generation, env) {
+  const now = Math.floor(Date.now() / 1000);
+  const result = await env.BOT_DB.prepare(`
+    INSERT INTO users(user_id, created_at, updated_at, language, language_message_id)
+    SELECT ?, ?, ?, ?, ? WHERE ? = 0 OR EXISTS (
+      SELECT 1 FROM users WHERE user_id = ? AND generation = ? AND forgotten_message_id < ?)
+    ON CONFLICT(user_id) DO UPDATE SET language = excluded.language,
+      language_message_id = excluded.language_message_id, updated_at = excluded.updated_at, erased = 0
+    WHERE users.generation = ? AND users.forgotten_message_id < ? AND users.language_message_id < ?
+  `).bind(String(chatId), now, now, language, messageId, generation,
+    String(chatId), generation, originId, generation, originId, messageId).run();
+  const current = await getUser(env.BOT_DB, String(chatId));
+  if (!current || current.generation !== generation || current.forgotten_message_id >= originId) return;
+  // One selection per keyboard. Old/retried updates cannot replace a newer preference.
+  if (Number(result.meta?.changes || 0) !== 1
+    && (current.language_message_id !== messageId || current.language !== language)) return;
+  await telegram(env, "setMyCommands", {
+    scope: { type: "chat", chat_id: chatId }, commands: userCommands(language)
+  });
+  await telegram(env, "sendMessage", {
+    chat_id: chatId,
+    text: t(language, "languageSaved") + "\n\n" + userText({ ...env, _userLanguage: language }, "welcome", "WELCOME_MESSAGE")
+  });
+}
+
+async function processLanguageCallback(query, env) {
+  const message = query.message;
+  const choice = /^lang:(zh|en|ja):(\d+):(\d+)$/.exec(query.data || "");
+  if (!choice || !query.from || query.from.is_bot || message?.chat?.type !== "private"
+    || String(message.chat.id) !== String(query.from.id)
+    || String(query.from.id) === String(env.ADMIN_USER_ID) || !Number.isSafeInteger(message.message_id)
+    || !Number.isSafeInteger(Number(choice[2])) || !Number.isSafeInteger(Number(choice[3]))
+    || Number(choice[3]) <= 0 || message.message_id <= Number(choice[3])) return;
+  await saveUserLanguage(message.chat.id, choice[1], message.message_id, Number(choice[3]), Number(choice[2]), env);
+  await telegram(env, "answerCallbackQuery", { callback_query_id: query.id }).catch(() => {});
+  await telegram(env, "editMessageReplyMarkup", {
+    chat_id: message.chat.id, message_id: message.message_id, reply_markup: { inline_keyboard: [] }
+  }).catch(() => {});
+}
+
 export function captchaQuestion(code) {
   const a = Math.floor(code / 4) % 9 + 1;
   const b = Math.floor(code / 36) + 1;
@@ -503,7 +597,7 @@ async function resumeCaptchaMessage(message, user, env, now) {
   const group = await getMediaGroup(env.BOT_DB, user.user_id, groupId);
   if (group && !["done", "rejected"].includes(group.state)) throw new RetryableError("首次訊息仍在轉送中");
   await clear();
-  if (!group) await telegram(env, "sendMessage", { chat_id: user.user_id, text: t(env.BOT_LANGUAGE, "captchaPendingLost") });
+  if (!group) await telegram(env, "sendMessage", { chat_id: user.user_id, text: userText(env, "captchaPendingLost") });
 }
 
 async function processCaptcha(message, user, env, now) {
@@ -516,7 +610,7 @@ async function processCaptcha(message, user, env, now) {
   if (!user || user.blocked || user.captcha_verified || message.message_id <= user.forgotten_message_id) return;
   const send = (key, code = user.captcha_code) => telegram(env, "sendMessage", {
     chat_id: message.chat.id,
-    text: t(env.BOT_LANGUAGE, key).replace("{question}", code == null ? "" : captchaQuestion(code).question)
+    text: userText(env, key).replace("{question}", code == null ? "" : captchaQuestion(code).question)
   });
   if (message.media_group_id && user.captcha_pending_group === captchaGroupId(message)
     && user.captcha_until > now && user.captcha_attempts < 3) {
@@ -649,9 +743,10 @@ async function forgetUser(db, userId, messageId, now) {
         last_rate_key = NULL, blocked_notice_at = 0, updated_at = ?,
         captcha_verified = 0, captcha_code = NULL, captcha_until = 0, captcha_attempts = 0,
         captcha_last_at = 0, captcha_message_id = 0, captcha_pending_group = NULL,
+        language = NULL, language_message_id = MAX(language_message_id, ?),
         generation = generation + 1, erased = 1, forgotten_message_id = ?, forgotten_at = ?
       WHERE user_id = ? AND forgotten_message_id < ?
-    `).bind(now, messageId, now, userId, messageId)
+    `).bind(now, messageId, messageId, now, userId, messageId)
   ]);
 }
 
@@ -1292,6 +1387,10 @@ async function notifyStoppedUpdate(update, env) {
   const adminTopic = String(message.chat.id) === String(env.ADMIN_GROUP_ID)
     && String(message.from.id) === String(env.ADMIN_USER_ID) && message.chat.is_forum;
   if (message.chat.type !== "private" && !adminTopic) return;
+  if (message.chat.type === "private" && String(message.from.id) !== String(env.ADMIN_USER_ID)) {
+    const user = await getUser(env.BOT_DB, String(message.from.id)).catch(() => null);
+    env = { ...env, BOT_LANGUAGE: user?.language || env.BOT_LANGUAGE };
+  }
   await sendAdminReplyHint(message, env, "retryStopped").catch((error) => {
     console.log(JSON.stringify({ event: "retry_notice_failed", error: sanitizeError(error) }));
   });
@@ -1300,7 +1399,7 @@ async function notifyStoppedUpdate(update, env) {
 async function sendRateLimitNotice(chatId, env) {
   await telegram(env, "sendMessage", {
     chat_id: chatId,
-    text: env.RATE_LIMIT_MESSAGE || t(env.BOT_LANGUAGE, "rateLimit")
+    text: userText(env, "rateLimit", "RATE_LIMIT_MESSAGE")
   });
 }
 
@@ -1308,7 +1407,7 @@ async function notifyUserCopyFailure(chatId, error, env) {
   if (error instanceof ObsoleteWorkError || isRetryableError(error) || isTopicMissing(error)) return;
   await telegram(env, "sendMessage", {
     chat_id: chatId,
-    text: env.UNSUPPORTED_MESSAGE || t(env.BOT_LANGUAGE, "unsupportedMessage")
+    text: userText(env, "unsupportedMessage", "UNSUPPORTED_MESSAGE")
   }).catch(() => {});
 }
 
@@ -1325,7 +1424,7 @@ async function notifyMediaFailure(group, error, env) {
   if (error instanceof ObsoleteWorkError || isRetryableError(error)) return;
   const user = await getUser(env.BOT_DB, group.user_id).catch(() => null);
   if (group.direction === "user_to_admin") {
-    await notifyUserCopyFailure(group.source_chat_id, error, env);
+    await notifyUserCopyFailure(group.source_chat_id, error, { ...env, _userLanguage: user?.language || env.BOT_LANGUAGE });
     return;
   }
   await telegram(env, "sendMessage", {
@@ -1624,7 +1723,8 @@ async function saveCopiedMappings(env, user, values) {
     await telegram(env, "sendMessage", {
       chat_id: values[0].sourceChatId,
       message_thread_id: String(values[0].sourceChatId) === String(env.ADMIN_GROUP_ID) ? user.topic_id : undefined,
-      text: t(env.BOT_LANGUAGE, "untrackedDelivery")
+      text: String(values[0].sourceChatId) === String(user.user_id)
+        ? t(user.language || env.BOT_LANGUAGE, "untrackedDelivery") : t(env.BOT_LANGUAGE, "untrackedDelivery")
     }).catch(() => {});
     throw new NonRetryableError("已轉送但保存對照與撤回均失敗，停止重送以避免重複");
   }
@@ -1683,6 +1783,7 @@ async function readiness(env) {
         (SELECT captcha_verified + captcha_until + captcha_attempts + captcha_last_at + captcha_message_id
           + COALESCE(captcha_code, 0) FROM users LIMIT 1) AS captcha,
         (SELECT captcha_pending_group FROM users LIMIT 1) AS captcha_pending,
+        (SELECT language FROM users WHERE language_message_id >= 0 LIMIT 1) AS user_language,
         (SELECT lease_token FROM processed_updates LIMIT 1) AS update_lease,
         (SELECT user_generation FROM media_groups LIMIT 1) AS album_generation,
         (SELECT lease_token FROM media_groups LIMIT 1) AS album_lease,
