@@ -141,8 +141,9 @@ test("三語按鈕保存用戶偏好，歡迎與指令跟隨選擇，管理端�
       return telegramResponse({ message_id: 11 });
     };
     await processUpdate({ message: userMessage(10, { text: "/start" }) }, env);
-    assert.equal(calls[0].payload.text, "自訂歡迎");
-    const buttons = calls[0].payload.reply_markup.inline_keyboard[0];
+    const welcome = calls.find((call) => call.method === "sendMessage").payload;
+    assert.equal(welcome.text, "自訂歡迎");
+    const buttons = welcome.reply_markup.inline_keyboard[0];
     assert.deepEqual(buttons.map((button) => button.text), ["中文", "English", "日本語"]);
     assert.equal((await db.prepare("SELECT COUNT(*) n FROM users").first()).n, 0);
     const data = buttons.find((button) => button.callback_data.startsWith(`lang:${language}:`)).callback_data;
@@ -196,7 +197,10 @@ test("語言指令在驗證前可用，切換不重置題目、不免驗也不�
 test("語言按鈕只影響點選者的私訊，無效語言、管理者、群組與跨用戶回調不觸碰資料", async () => {
   const env = { ...auditEnv({ prepare() { throw new Error("must not access data"); } }) };
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => { throw new Error("must not call Telegram"); };
+  globalThis.fetch = async (url) => {
+    assert.ok(String(url).endsWith("/answerCallbackQuery"));
+    return telegramResponse(true);
+  };
   try {
     for (const update of [
       languageCallback(11, "lang:fr:0:10"), languageCallback(11, "lang:en:0:10:extra"),
@@ -313,7 +317,7 @@ test("管理者更新選單時補訂閱語言回調，保留 Webhook URL、更�
     calls.push({ method, payload: JSON.parse(init.body) });
     return telegramResponse(method === "getWebhookInfo" ? webhook : true);
   };
-  const env = auditEnv(db);
+  const env = { ...auditEnv(db), BOT_TOKEN: "admin-callback-subscription-test" };
   await processUpdate({ message: adminMessage(10, "/start") }, env);
   assert.deepEqual(calls.find((call) => call.method === "setWebhook").payload, {
     url: webhook.url, secret_token: env.WEBHOOK_SECRET, allowed_updates: ["message", "edited_message", "callback_query"],
@@ -323,6 +327,26 @@ test("管理者更新選單時補訂閱語言回調，保留 Webhook URL、更�
   webhook.allowed_updates.push("callback_query");
   await processUpdate({ message: adminMessage(11, "/start") }, env);
   assert.equal(calls.some((call) => call.method === "setWebhook"), false);
+}));
+
+test("使用者可自行啟用按鈕回調，不依賴管理者先更新選單；先停止等待再保存偏好", () => withDatabaseMock(async (db) => {
+  const calls = [], env = { ...auditEnv(db), BOT_TOKEN: "user-callback-subscription-test" };
+  const webhook = { url: "https://example.test/webhook", allowed_updates: ["message", "edited_message"], max_connections: 10 };
+  globalThis.fetch = async (url, init) => {
+    const method = String(url).split("/").pop(), payload = JSON.parse(init.body);
+    calls.push({ method, payload });
+    return telegramResponse(method === "getWebhookInfo" ? webhook : { message_id: 11 });
+  };
+  await processUpdate({ message: userMessage(10, { text: "/start" }) }, env);
+  assert.deepEqual(calls.map((call) => call.method), ["getWebhookInfo", "setWebhook", "sendMessage"]);
+  const choice = calls.at(-1).payload.reply_markup.inline_keyboard[0][1].callback_data;
+  calls.length = 0;
+  await processUpdate(languageCallback(11, choice), env);
+  assert.equal(calls[0].method, "answerCallbackQuery");
+  assert.equal((await db.prepare("SELECT language FROM users").first()).language, "en");
+  calls.length = 0;
+  await processUpdate({ message: userMessage(12, { text: "/language" }) }, env);
+  assert.deepEqual(calls.map((call) => call.method), ["sendMessage"]);
 }));
 
 test("初始化寫入暫時失敗後，相簿可由下一次重試完成", () => withDatabaseMock(async (db) => {
@@ -796,8 +820,8 @@ test("/forget 需確認並清除路由資料，封鎖者保留最小封鎖紀錄
 
 test("使用者歡迎訊息依部署語言，不依 Telegram 使用者語言", () => withDatabaseMock(async (db) => {
   const sent = [];
-  globalThis.fetch = async (_url, init) => {
-    sent.push(JSON.parse(init.body).text);
+  globalThis.fetch = async (url, init) => {
+    if (String(url).endsWith("/sendMessage")) sent.push(JSON.parse(init.body).text);
     return telegramResponse({ message_id: sent.length });
   };
   for (const language of ["ja", "en"]) {
@@ -1673,10 +1697,10 @@ test("三語兩種模式保留歡迎文字，首則訊息答題後自動轉送�
         return telegramResponse(method === "createForumTopic" ? { message_thread_id: 72 } : { message_id: 700 });
       };
       await processUpdate({ message: userMessage(10, { text: "/start" }) }, env);
-      assert.equal(calls[0].payload.text, env.WELCOME_MESSAGE || t(language, "welcome"));
+      assert.equal(calls.find((call) => call.method === "sendMessage").payload.text, env.WELCOME_MESSAGE || t(language, "welcome"));
       assert.equal((await db.prepare("SELECT COUNT(*) n FROM users").first()).n, 0);
       await processUpdate({ message: userMessage(11, { text: "第一則聯絡內容" }) }, env);
-      assert.ok(calls[1].payload.text.startsWith(t(language, "captchaPrompt").split("{question}")[0]));
+      assert.ok(calls.at(-1).payload.text.startsWith(t(language, "captchaPrompt").split("{question}")[0]));
       await db.prepare("UPDATE users SET captcha_code=0 WHERE user_id='2'").run();
       await processUpdate({ message: userMessage(12, { text: "２" }) }, env);
       assert.equal(calls.at(-1).payload.text, t(language, "captchaPassed"));

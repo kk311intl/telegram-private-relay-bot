@@ -13,6 +13,7 @@ const CAPTCHA_TTL_SECONDS = 300;
 const CAPTCHA_COOLDOWN_SECONDS = 900;
 const USER_LANGUAGES = { zh: "中文", en: "English", ja: "日本語" };
 let botIdentity;
+let languageWebhookToken;
 
 export default {
   async fetch(request, env, ctx) {
@@ -236,18 +237,7 @@ async function configureAdminMenu(env) {
       scope: { type: "all_private_chats" },
       commands: userCommands(language)
     });
-    // Existing webhooks may subscribe only to messages. Keep their URL and pending updates.
-    const webhook = await telegram(env, "getWebhookInfo", {});
-    if (webhook.url && !webhook.has_custom_certificate && webhook.allowed_updates?.length
-      && !webhook.allowed_updates.includes("callback_query")) {
-      await telegram(env, "setWebhook", {
-        url: webhook.url,
-        secret_token: env.WEBHOOK_SECRET,
-        allowed_updates: [...webhook.allowed_updates, "callback_query"],
-        max_connections: webhook.max_connections,
-        drop_pending_updates: false
-      });
-    }
+    await ensureLanguageCallbacks(env);
   } catch (error) {
     console.log(JSON.stringify({ event: "admin_menu_setup_failed", error: sanitizeError(error) }));
   }
@@ -360,6 +350,7 @@ async function processUserMessage(message, env) {
       return saveUserLanguage(message.chat.id, selected, message.message_id, message.message_id,
         user?.generation || 0, env);
     }
+    await ensureLanguageCallbacks(env);
     await telegram(env, "sendMessage", {
       chat_id: message.chat.id,
       text: "選擇語言 / Choose a language / 言語を選択",
@@ -385,6 +376,7 @@ async function processUserMessage(message, env) {
 
   if (message.message_id <= (user?.forgotten_message_id || 0)) return;
   if (command === "start") {
+    await ensureLanguageCallbacks(env);
     await telegram(env, "sendMessage", {
       chat_id: message.chat.id,
       text: userText(env, "welcome", "WELCOME_MESSAGE"),
@@ -497,6 +489,24 @@ function languageKeyboard(message, user) {
   }))] };
 }
 
+async function ensureLanguageCallbacks(env) {
+  if (languageWebhookToken === env.BOT_TOKEN) return;
+  // Only menu commands check once per warm Worker, never ordinary relayed messages.
+  const webhook = await telegram(env, "getWebhookInfo", {});
+  if (!webhook?.url) return;
+  if (webhook.allowed_updates?.length && !webhook.allowed_updates.includes("callback_query")) {
+    if (webhook.has_custom_certificate) throw new NonRetryableError("請為自訂憑證 Webhook 啟用 callback_query");
+    await telegram(env, "setWebhook", {
+      url: webhook.url,
+      secret_token: env.WEBHOOK_SECRET,
+      allowed_updates: [...webhook.allowed_updates, "callback_query"],
+      max_connections: webhook.max_connections,
+      drop_pending_updates: false
+    });
+  }
+  languageWebhookToken = env.BOT_TOKEN;
+}
+
 async function saveUserLanguage(chatId, language, messageId, originId, generation, env) {
   const now = Math.floor(Date.now() / 1000);
   const result = await env.BOT_DB.prepare(`
@@ -523,6 +533,10 @@ async function saveUserLanguage(chatId, language, messageId, originId, generatio
 }
 
 async function processLanguageCallback(query, env) {
+  // Stop the client spinner even if an old keyboard or unsupported payload is rejected.
+  if (typeof query.id === "string") {
+    await telegram(env, "answerCallbackQuery", { callback_query_id: query.id }).catch(() => {});
+  }
   const message = query.message;
   const choice = /^lang:(zh|en|ja):(\d+):(\d+)$/.exec(query.data || "");
   if (!choice || !query.from || query.from.is_bot || message?.chat?.type !== "private"
@@ -531,7 +545,6 @@ async function processLanguageCallback(query, env) {
     || !Number.isSafeInteger(Number(choice[2])) || !Number.isSafeInteger(Number(choice[3]))
     || Number(choice[3]) <= 0 || message.message_id <= Number(choice[3])) return;
   await saveUserLanguage(message.chat.id, choice[1], message.message_id, Number(choice[3]), Number(choice[2]), env);
-  await telegram(env, "answerCallbackQuery", { callback_query_id: query.id }).catch(() => {});
   await telegram(env, "editMessageReplyMarkup", {
     chat_id: message.chat.id, message_id: message.message_id, reply_markup: { inline_keyboard: [] }
   }).catch(() => {});

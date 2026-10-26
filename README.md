@@ -120,7 +120,7 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 
 管理權限只認 `ADMIN_USER_ID`。管理者私訊 `/start` 更新預設使用者選單及本人可見的管理選單，並為一般 HTTPS Webhook 補訂閱 `callback_query`；自訂憑證的 Webhook 須自行更新訂閱。選單不會在每則訊息重設。
 
-使用者 `/start` 的按鈕與 `/language` 都可選語言，偏好與個別指令選單會保存；`/help` 只讀取偏好，不寫入或轉送給管理者。未選擇時沿用部署預設，不依 Telegram 語言自動切換。正常聊天重用既有使用者查詢，不多讀寫 D1；只在主動切換時保存偏好。`/forget confirm` 也會清除偏好與個別選單。升級前須套用 `0007_user_language.sql`，管理者再私訊 `/start` 更新選單及按鈕訂閱。
+使用者 `/start` 的按鈕與 `/language` 都可選語言，偏好與個別指令選單會保存；`/help` 只讀取偏好，不寫入或轉送給管理者。未選擇時沿用部署預設，不依 Telegram 語言自動切換。正常聊天重用既有使用者查詢，不多讀寫 D1；只在主動切換時保存偏好。`/forget confirm` 也會清除偏好與個別選單。升級前須套用 `0007_user_language.sql`。用戶開啟語言選單時也會自動確認按鈕訂閱，每個暖 Worker 只檢查一次；管理者 `/start` 用於更新預設指令選單。
 
 `/close` 只關閉話題，不封鎖使用者；新訊息會優先重開原話題，找不到話題才另建。要停止接收訊息請用 `/block`。管理者回覆失效對照、舊話題或錯誤位置時會收到「未送出」提示；話題無法發送提示時改私訊管理者。
 
@@ -287,7 +287,7 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 
 管理権限は `ADMIN_USER_ID` だけで判定します。管理者が `/start` を個別チャットすると、既定のユーザー用メニューと本人専用の管理メニューを更新し、通常の HTTPS Webhook に `callback_query` を追加します。独自の証明書を使う Webhook は手動で更新してください。メニューはメッセージごとに設定し直しません。
 
-ユーザーは `/start` のボタンか `/language` で言語を選び、設定と個別コマンドメニューを保存できます。`/help` は設定を読むだけで、書き込みや管理者への転送は行いません。未選択時はデプロイの既定値を使い、Telegram の言語では自動切り替えしません。通常の会話は既存のユーザー照会を使い、D1 の追加読み書きはありません。`/forget confirm` は言語と個別メニューも消去します。更新前に `0007_user_language.sql` を適用し、管理者が `/start` を個別送信してメニューとボタンの受信設定を更新してください。
+ユーザーは `/start` のボタンか `/language` で言語を選び、設定と個別コマンドメニューを保存できます。`/help` は設定を読むだけで、書き込みや管理者への転送は行いません。未選択時はデプロイの既定値を使い、Telegram の言語では自動切り替えしません。通常の会話は既存のユーザー照会を使い、D1 の追加読み書きはありません。`/forget confirm` は言語と個別メニューも消去します。更新前に `0007_user_language.sql` を適用してください。ユーザーが言語メニューを開く際にもボタンの受信設定を自動確認し、稼働中の Worker ごとに一度だけ照会します。管理者の `/start` は既定コマンドメニューの更新に使います。
 
 `/close` はトピックを閉じるだけで、ユーザーをブロックしません。新着時は元のトピックを再開し、見つからない場合にのみ新規作成します。受信を止めるには `/block` を使ってください。失効した対応情報、古いトピック、誤った場所への管理者の返信には未送信の案内を返します。トピックに案内を送れない場合は管理者へ個別送信します。
 
@@ -454,7 +454,7 @@ Users message the bot privately. The admin replies in the matching topic or, in 
 
 Only `ADMIN_USER_ID` grants admin access. The admin sends `/start` privately to refresh the default user menu and their private admin menus, and subscribe standard HTTPS webhooks to `callback_query`. Webhooks with a custom certificate need a manual subscription update. Menus are not reset on every message.
 
-Users can choose a language through the `/start` buttons or `/language`; their preference and private command menu are saved. `/help` only reads the preference, without writes or relaying to the admin. Users without a choice use the deployment default, regardless of Telegram language. Normal chat reuses existing user queries with no extra D1 reads or writes; preferences are saved only on explicit selection. `/forget confirm` also clears the preference and private menu. Apply `0007_user_language.sql` before upgrading, then have the admin send `/start` privately to refresh menus and button subscriptions.
+Users can choose a language through the `/start` buttons or `/language`; their preference and private command menu are saved. `/help` only reads the preference, without writes or relaying to the admin. Users without a choice use the deployment default, regardless of Telegram language. Normal chat reuses existing user queries with no extra D1 reads or writes; preferences are saved only on explicit selection. `/forget confirm` also clears the preference and private menu. Apply `0007_user_language.sql` before upgrading. Opening a user language menu also checks button subscriptions once per warm Worker; the admin's `/start` refreshes the default command menus.
 
 `/close` closes a topic without blocking the user. New messages reopen the original topic; a new topic is created only if the old one cannot be found. Use `/block` to stop accepting messages. Admin replies with expired mappings, in old topics, or in the wrong place receive a not-sent notice. If the topic cannot receive that notice, it is sent privately to the admin.
 
