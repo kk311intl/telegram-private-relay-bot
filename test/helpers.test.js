@@ -46,15 +46,15 @@ test("三種部署語言都有完整的訊息文字", () => {
     adminHelpTopic: 1, adminHelpDirect: 1, adminStatus: 1, statusDone: 1,
     statusFailed: 1, statusDiscarded: 1, statusPending: 1, statusProcessing: 1,
     statusStalled: 1, unknown: 1, notBlocked: 1,
-    forgetConfirm: 1, forgetDone: 1, command_start: 1, command_help: 1,
+    command_start: 1, command_help: 1,
     command_status: 1, command_user: 1, command_block: 1,
     command_unblock: 1, command_close: 1,
     unsupportedMessage: 1, deliveryFailed: 1, albumFailed: 1, untrackedDelivery: 1,
     groupId: 1, newChat: 1, receivedChat: 1, userDetails: 1, name: 1,
     username: 1, status: 1, blockedStatus: 1, normalStatus: 1,
     notSet: 1, notProvided: 1, user: 1, fieldSeparator: 1,
-    userHelp: 1, userCommand_start: 1, userCommand_help: 1, userCommand_id: 1,
-    userCommand_forget: 1, replyRequired: 1, topicRequired: 1, replyUnavailable: 1,
+    userHelp: 1, userCommand_start: 1,
+    replyRequired: 1, topicRequired: 1, replyUnavailable: 1,
     retryStopped: 1, statusLastRelay: 1, statusNoRelay: 1, statusLastError: 1,
     statusNoError: 1, failureRateLimit: 1, failureUnavailable: 1, failurePermission: 1,
     failureUnsupported: 1, failureProcessing: 1,
@@ -80,12 +80,7 @@ test("三語資料卡使用對應標點並保留 HTML 跳脫", () => {
   }
 });
 
-test("三語操作提示分行並保留資料清除的安全範圍", () => {
-  const limits = {
-    zh: [/不會刪除|不會刪/, /備份/, /不會解除封鎖/, /User ID/, /舊請求/, /7 天.*排程/, /新訊息/],
-    ja: [/削除しません/, /バックアップ/, /ブロックは解除されません/, /User ID/, /古いリクエスト/, /7日後.*定期処理/, /新しいメッセージ/],
-    en: [/not deleted/, /backups/, /block remains/, /User ID/, /old requests/, /scheduled cleanup.*7 days/, /new messages/]
-  };
+test("三語管理操作提示完整，使用者說明不保留已移除指令", () => {
   for (const language of ["zh", "ja", "en"]) {
     for (const key of ["adminHelpTopic", "adminHelpDirect"]) {
       const help = t(language, key);
@@ -96,16 +91,9 @@ test("三語操作提示分行並保留資料清除的安全範圍", () => {
     }
     assert.match(t(language, "adminHelpTopic"), /^\/close — /m);
     assert.doesNotMatch(t(language, "adminHelpDirect"), /\/close/);
-    assert.match(t(language, "forgetConfirm"), /\/forget confirm/);
-    for (const key of ["forgetConfirm", "forgetDone"]) {
-      const text = t(language, key);
-      assert.ok(text.includes("\n\n"));
-      assert.ok(text.includes("Telegram"));
-      for (const limit of limits[language]) assert.match(text, limit);
-    }
     assert.doesNotMatch(t(language, "adminStatus"), /D1/);
+    assert.doesNotMatch(t(language, "userHelp"), /\/(forget|language)\b/);
   }
-  assert.match(t("en", "forgetConfirm"), /stores about you/);
   assert.doesNotMatch(t("en", "welcome"), /\bwe\b|we'll/i);
 });
 

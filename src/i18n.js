@@ -3,19 +3,14 @@ const messages = {
     adminReadyTopic: "話題模式。\n請在對應使用者的話題內回覆；傳送 /help 查看指令。",
     adminReadyDirect: "管理者私訊模式。\n請回覆 Bot 轉來的使用者訊息；傳送 /help 查看指令。",
     blockedNotice: "目前無法接收你的訊息。",
-    welcome: "請在此傳送訊息。管理者可透過 Bot 回覆。\n傳送 /help 查看使用說明，/language 切換語言。",
-    languageSaved: "已切換為中文。傳送 /language 可再次切換。",
+    welcome: "請在此傳送訊息。管理者可透過 Bot 回覆。\n傳送 /help 查看使用說明。",
+    languageSaved: "已切換為中文。傳送 /start 可再次切換。",
     userHelp: `直接傳送文字或一般媒體，管理者可透過 Bot 回覆。首次聯絡可能需要算術驗證，以攔截自動化廣告；通過後會自動轉送第一則訊息。
 
 /start — 查看歡迎訊息
 /help — 查看使用說明
-/language — 切換語言
-/id — 查看自己的 User ID
-/forget — 查看資料清除說明；不會立即清除資料`,
-    userCommand_start: "查看歡迎訊息",
-    userCommand_help: "查看使用說明",
-    userCommand_id: "查看自己的 User ID",
-    userCommand_forget: "查看資料清除說明",
+/id — 查看自己的 User ID`,
+    userCommand_start: "歡迎訊息與語言選擇",
     captchaPrompt: "為攔截自動化廣告，首次聯絡需先驗證：{question} = ?\n請在 5 分鐘內只回覆數字；連錯 3 次須等 15 分鐘。\n通過後會自動將第一則訊息（或第一組相簿）送給管理者，不必重送。",
     captchaWrong: "答案不正確，請只回覆數字：{question} = ?\n連錯 3 次須等 15 分鐘；原題有效時間不變。",
     captchaLocked: "錯誤次數已達上限，訊息未轉送。請等 15 分鐘後重新傳送聯絡內容，再完成驗證。",
@@ -79,19 +74,6 @@ const messages = {
     failureProcessing: "資料處理失敗",
     unknown: "暫時無法取得",
     notBlocked: "找不到已封鎖的使用者。",
-    forgetConfirm: `若要清除 Bot 保存的你的個人資料、相簿暫存及轉送對照，請傳送 /forget confirm。
-
-清除範圍：
-• 不會刪除 Telegram 已有的聊天訊息或既有備份。
-• 清除資料不會解除封鎖。
-• 為防止舊請求重建資料，會保留含 User ID 的必要紀錄；非封鎖者的紀錄在 7 天後依排程清理。
-• 之後的新訊息可能重新建立資料。`,
-    forgetDone: `這次資料清除已完成。
-
-• Telegram 已有的聊天訊息和既有備份不會刪除。
-• 清除資料不會解除封鎖。
-• 為防止舊請求重建資料，會保留含 User ID 的必要紀錄；非封鎖者的紀錄在 7 天後依排程清理。
-• 之後的新訊息可能重新建立資料。`,
     command_start: "更新指令選單",
     command_help: "查看管理指令",
     command_status: "查看近 24 小時狀態",
@@ -122,19 +104,14 @@ const messages = {
     adminReadyTopic: "トピックモードです。\nユーザーのトピックで返信してください。/help でコマンドを確認できます。",
     adminReadyDirect: "管理者個別チャットモードです。\n転送されたメッセージに返信してください。/help でコマンドを確認できます。",
     blockedNotice: "現在、メッセージを受け付けられません。",
-    welcome: "ここにメッセージを送ってください。管理者はこのチャットに返信できます。\n/help で使い方を確認、/language で言語を変更できます。",
-    languageSaved: "日本語に変更しました。/language で再び変更できます。",
+    welcome: "ここにメッセージを送ってください。管理者はこのチャットに返信できます。\n/help で使い方を確認できます。",
+    languageSaved: "日本語に変更しました。/start で再び変更できます。",
     userHelp: `テキストや一般的なメディアを送信すると、管理者が Bot を通して返信できます。自動広告を防ぐため、初回は計算による確認が必要な場合があります。確認後、最初のメッセージを自動転送します。
 
 /start — 開始時のメッセージを表示
 /help — 使い方を表示
-/language — 言語を変更
-/id — 自分の User ID を表示
-/forget — データ消去の説明を表示（直ちには消去しません）`,
-    userCommand_start: "開始時のメッセージを表示",
-    userCommand_help: "使い方を表示",
-    userCommand_id: "自分の User ID を表示",
-    userCommand_forget: "データ消去の説明を表示",
+/id — 自分の User ID を表示`,
+    userCommand_start: "案内と言語選択",
     captchaPrompt: "自動広告を防ぐため、初めての連絡では確認が必要です：{question} = ?\n5分以内に数字だけを送ってください。3回間違えると15分間待つ必要があります。\n確認後、最初のメッセージ（または最初のアルバム）を自動転送します。送り直す必要はありません。",
     captchaWrong: "答えが違います。数字だけを送ってください：{question} = ?\n3回間違えると15分間待つ必要があります。有効期限は延長されません。",
     captchaLocked: "間違いの上限に達しました。メッセージは転送していません。15分後に連絡したい内容を送り直し、確認してください。",
@@ -198,19 +175,6 @@ Bot との個別チャット：
     failureProcessing: "データ処理の失敗",
     unknown: "取得できません",
     notBlocked: "ブロック中のユーザーが見つかりません。",
-    forgetConfirm: `Bot が保存しているあなたの個人情報、アルバムの一時データ、メッセージの対応情報を消去するには、/forget confirm と送信してください。
-
-消去の範囲：
-• Telegram の既存メッセージや既存のバックアップは削除しません。
-• 消去してもブロックは解除されません。
-• 古いリクエストによる再作成を防ぐため、User ID を含む必要な記録を保持します。ブロックされていないユーザーの記録は7日後の定期処理で削除します。
-• その後の新しいメッセージで情報が再作成される場合があります。`,
-    forgetDone: `今回のデータ消去が完了しました。
-
-• Telegram の既存メッセージや既存のバックアップは削除しません。
-• 消去してもブロックは解除されません。
-• 古いリクエストによる再作成を防ぐため、User ID を含む必要な記録を保持します。ブロックされていないユーザーの記録は7日後の定期処理で削除します。
-• その後の新しいメッセージで情報が再作成される場合があります。`,
     command_start: "コマンドメニューを更新",
     command_help: "管理コマンドを表示",
     command_status: "過去24時間の状況を表示",
@@ -241,19 +205,14 @@ Bot との個別チャット：
     adminReadyTopic: "Topic mode.\nReply in the user's topic. Send /help for commands.",
     adminReadyDirect: "Admin private-chat mode.\nReply to a message relayed by the bot. Send /help for commands.",
     blockedNotice: "This bot is not accepting your messages right now.",
-    welcome: "Send a message here. The admin can reply in this chat.\nSend /help for instructions or /language to change language.",
-    languageSaved: "Language set to English. Use /language to change it again.",
+    welcome: "Send a message here. The admin can reply in this chat.\nSend /help for instructions.",
+    languageSaved: "Language set to English. Use /start to change it again.",
     userHelp: `Send text or standard media here. The admin can reply through the bot. First contact may require an arithmetic check to reduce automated ads. Your first message is relayed automatically after passing.
 
 /start — Show the welcome message
 /help — Show instructions
-/language — Change language
-/id — Show your User ID
-/forget — Show erasure instructions; does not erase data immediately`,
-    userCommand_start: "Show the welcome message",
-    userCommand_help: "Show instructions",
-    userCommand_id: "Show your User ID",
-    userCommand_forget: "Show erasure instructions",
+/id — Show your User ID`,
+    userCommand_start: "Welcome and language",
     captchaPrompt: "To reduce automated ads, please verify your first contact: {question} = ?\nReply with digits only within 5 minutes. Three wrong answers require a 15-minute wait.\nYour first message (or first album) is relayed automatically after passing. No need to resend it.",
     captchaWrong: "Incorrect answer. Reply with digits only: {question} = ?\nThree wrong answers require a 15-minute wait. The original expiry still applies.",
     captchaLocked: "Too many wrong answers. Your message was not relayed. Wait 15 minutes, then send your contact message again for a new check.",
@@ -317,19 +276,6 @@ Regular replies go to that user.`,
     failureProcessing: "Data processing failed",
     unknown: "Unavailable",
     notBlocked: "No blocked user was found.",
-    forgetConfirm: `To erase the personal data, staged albums, and relay mappings this bot stores about you, send /forget confirm.
-
-Erasure scope:
-• Existing Telegram messages and existing backups are not deleted.
-• Any block remains in effect.
-• Necessary records including your User ID prevent old requests from restoring data. For unblocked users, scheduled cleanup removes these records after 7 days.
-• Later new messages may create data again.`,
-    forgetDone: `This data erasure request is complete.
-
-• Existing Telegram messages and existing backups are not deleted.
-• Any block remains in effect.
-• Necessary records including your User ID prevent old requests from restoring data. For unblocked users, scheduled cleanup removes these records after 7 days.
-• Later new messages may create data again.`,
     command_start: "Refresh command menus",
     command_help: "Show admin commands",
     command_status: "Show past 24-hour status",

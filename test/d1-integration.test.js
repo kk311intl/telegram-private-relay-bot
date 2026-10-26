@@ -128,10 +128,65 @@ function seedAuditUser(db) {
   db.database.exec("INSERT INTO users(user_id,first_name,topic_id,topic_card_message_id,created_at,updated_at) VALUES ('2','Test',72,0,1,1)");
 }
 
+// Simulate historical erased records to check generation fencing.
+async function eraseAuditUser(db, messageId, userId = "2", now = Math.floor(Date.now() / 1000)) {
+  await db.batch([
+    db.prepare(`
+      INSERT OR IGNORE INTO users(user_id, created_at, updated_at, erased)
+      VALUES (?, ?, ?, 1)
+    `).bind(userId, now, now),
+    db.prepare(`
+      DELETE FROM media_group_messages WHERE (source_chat_id = ? OR EXISTS (
+        SELECT 1 FROM media_groups AS groups
+        WHERE groups.user_id = ?
+          AND groups.source_chat_id = media_group_messages.source_chat_id
+          AND groups.media_group_id = media_group_messages.media_group_id
+      ))
+        AND EXISTS (SELECT 1 FROM users WHERE user_id = ? AND forgotten_message_id < ?)
+    `).bind(userId, userId, userId, messageId),
+    ...["media_groups", "message_map", "rate_admissions"].map((table) => db.prepare(`
+      DELETE FROM ${table} WHERE user_id = ?
+        AND EXISTS (SELECT 1 FROM users WHERE user_id = ? AND forgotten_message_id < ?)
+    `).bind(userId, userId, messageId)),
+    db.prepare(`
+      UPDATE users SET username = NULL, first_name = '', last_name = '', topic_id = NULL,
+        topic_card_message_id = NULL, topic_lease_until = 0, topic_lease_token = NULL,
+        last_rate_key = NULL, blocked_notice_at = 0, updated_at = ?,
+        captcha_verified = 0, captcha_code = NULL, captcha_until = 0, captcha_attempts = 0,
+        captcha_last_at = 0, captcha_message_id = 0, captcha_pending_group = NULL,
+        language = NULL, language_message_id = MAX(language_message_id, ?),
+        generation = generation + 1, erased = 1, forgotten_message_id = ?, forgotten_at = ?
+      WHERE user_id = ? AND forgotten_message_id < ?
+    `).bind(now, messageId, messageId, now, userId, messageId)
+  ]);
+}
+
 function languageCallback(messageId, data, extra = {}) {
   return { callback_query: { id: `callback-${messageId}`, from: { id: 2, is_bot: false }, data,
     message: { message_id: messageId, chat: { id: 2, type: "private" } }, ...extra } };
 }
+
+test("使用者選單只有 start；已移除指令不清資料、不改語言，也不轉送", () => withDatabaseMock(async (db) => {
+  seedAuditUser(db);
+  db.database.exec("UPDATE users SET language = 'en', captcha_verified = 1");
+  const before = await db.prepare("SELECT * FROM users").first(), calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push({ method: String(url).split("/").pop(), payload: JSON.parse(init.body) });
+    return telegramResponse(true);
+  };
+  const env = auditEnv(db);
+  for (const text of ["/forget", "/forget confirm", "/language", "/language ja"]) {
+    await processUpdate({ message: userMessage(100, { text }) }, env);
+    assert.equal(calls.at(-1).payload.text, t("en", "unknownCommand"));
+  }
+  assert.deepEqual(await db.prepare("SELECT * FROM users").first(), before);
+  assert.equal(calls.every((call) => call.method === "sendMessage"), true);
+  await processUpdate({ message: userMessage(101, { text: "/start" }) }, env);
+  assert.deepEqual(calls.find((call) => call.method === "setMyCommands").payload, {
+    scope: { type: "chat", chat_id: 2 }, commands: [{ command: "start", description: t("en", "userCommand_start") }]
+  });
+  assert.equal(calls.at(-1).payload.reply_markup.inline_keyboard[0].length, 3);
+}));
 
 test("三語按鈕保存用戶偏好，歡迎與指令跟隨選擇，管理端維持部署語言", async () => {
   for (const language of ["zh", "en", "ja"]) await withDatabaseMock(async (db) => {
@@ -152,10 +207,10 @@ test("三語按鈕保存用戶偏好，歡迎與指令跟隨選擇，管理端�
     assert.equal(user.language, language);
     assert.equal(user.captcha_verified, 0);
     assert.equal(user.first_name, "");
-    const menu = calls.find((call) => call.method === "setMyCommands").payload;
+    const menu = calls.filter((call) => call.method === "setMyCommands").at(-1).payload;
     assert.deepEqual(menu.scope, { type: "chat", chat_id: 2 });
-    assert.deepEqual(menu.commands.map((command) => command.command), ["start", "help", "language", "id", "forget"]);
-    assert.equal(menu.commands.find((command) => command.command === "help").description, t(language, "userCommand_help"));
+    assert.deepEqual(menu.commands.map((command) => command.command), ["start"]);
+    assert.equal(menu.commands[0].description, t(language, "userCommand_start"));
     assert.ok(calls.some((call) => call.method === "answerCallbackQuery"));
     assert.deepEqual(calls.at(-1).payload.reply_markup, { inline_keyboard: [] });
     await processUpdate({ message: userMessage(12, { text: "/help" }) }, { ...env });
@@ -170,7 +225,7 @@ test("三語按鈕保存用戶偏好，歡迎與指令跟隨選擇，管理端�
   });
 });
 
-test("語言指令在驗證前可用，切換不重置題目、不免驗也不轉送指令", () => withDatabaseMock(async (db) => {
+test("語言選擇在驗證前可用，切換不重置題目、不免驗也不轉送指令", () => withDatabaseMock(async (db) => {
   const env = { ...auditEnv(db), CAPTCHA_ENABLED: "true" }, calls = [];
   globalThis.fetch = async (url, init) => {
     const method = String(url).split("/").pop();
@@ -178,11 +233,11 @@ test("語言指令在驗證前可用，切換不重置題目、不免驗也不�
     return telegramResponse(method === "createForumTopic" ? { message_thread_id: 72 }
       : method === "copyMessages" ? [{ message_id: 700 }] : { message_id: 701 });
   };
-  await processUpdate({ message: userMessage(10, { text: "/language en" }) }, env);
+  await processUpdate(languageCallback(10, "lang:en:0:9"), env);
   await processUpdate({ message: userMessage(11, { text: "first contact" }) }, env);
   assert.ok(calls.at(-1).payload.text.startsWith(t("en", "captchaPrompt").split("{question}")[0]));
   const before = await db.prepare("SELECT * FROM users WHERE user_id = '2'").first();
-  await processUpdate({ message: userMessage(12, { text: "/language ja" }) }, env);
+  await processUpdate(languageCallback(12, "lang:ja:0:11"), env);
   const after = await db.prepare("SELECT * FROM users WHERE user_id = '2'").first();
   for (const key of ["captcha_code", "captcha_until", "captcha_attempts", "captcha_pending_group", "captcha_message_id", "captcha_verified"]) {
     assert.equal(after[key], before[key], key);
@@ -215,23 +270,21 @@ test("語言按鈕只影響點選者的私訊，無效語言、管理者、群�
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test("清除資料同時清除語言和個別選單，舊按鈕與舊指令不能恢復偏好", () => withDatabaseMock(async (db) => {
+test("歷史清除控制紀錄仍阻止舊按鈕恢復偏好，新選擇可保存", () => withDatabaseMock(async (db) => {
   const calls = [], env = auditEnv(db);
   globalThis.fetch = async (url, init) => {
     calls.push({ method: String(url).split("/").pop(), payload: JSON.parse(init.body) });
     return telegramResponse({ message_id: 11 });
   };
   await processUpdate(languageCallback(11, "lang:en:0:10"), env);
-  await processUpdate({ message: userMessage(20, { text: "/forget confirm" }) }, env);
-  assert.equal(calls.at(-1).payload.text, t("en", "forgetDone"));
-  assert.deepEqual(calls.find((call) => call.method === "deleteMyCommands").payload.scope, { type: "chat", chat_id: 2 });
+  await eraseAuditUser(db, 20);
   await processUpdate(languageCallback(11, "lang:en:0:10"), env);
   await processUpdate(languageCallback(30, "lang:ja:0:10"), env);
-  await processUpdate({ message: userMessage(15, { text: "/language en" }) }, env);
+  await processUpdate(languageCallback(15, "lang:en:0:14"), env);
   let user = await db.prepare("SELECT * FROM users WHERE user_id = '2'").first();
   assert.equal(user.language, null);
   assert.equal(user.erased, 1);
-  await processUpdate({ message: userMessage(31, { text: "/language" }) }, env);
+  await processUpdate({ message: userMessage(31, { text: "/start" }) }, env);
   const data = calls.at(-1).payload.reply_markup.inline_keyboard[0].find((button) => button.text === "日本語").callback_data;
   await processUpdate(languageCallback(32, data), env);
   user = await db.prepare("SELECT * FROM users WHERE user_id = '2'").first();
@@ -248,7 +301,7 @@ test("語言寫入和清除併發時，舊選擇不能重新建立資料", () =>
     if (sql.includes("INSERT INTO users(user_id, created_at, updated_at, language")) {
       const run = statement.run.bind(statement);
       statement.run = async () => {
-        await processUpdate({ message: userMessage(20, { text: "/forget confirm" }) }, env);
+        await eraseAuditUser(db, 20);
         return run();
       };
     }
@@ -277,7 +330,7 @@ test("語言通知失敗後可重試，舊回調不能覆蓋較新選擇，同�
   assert.equal((await worker.fetch(request(), env)).status, 500);
   await processUpdate(languageCallback(11, "lang:ja:0:10"), env);
   assert.equal((await db.prepare("SELECT language FROM users WHERE user_id = '2'").first()).language, "en");
-  await processUpdate({ message: userMessage(30, { text: "/language ja" }) }, env);
+  await processUpdate(languageCallback(30, "lang:ja:0:29"), env);
   assert.equal((await worker.fetch(request(), env)).status, 200);
   assert.equal((await db.prepare("SELECT language FROM users WHERE user_id = '2'").first()).language, "ja");
   assert.equal(menus.length, 2);
@@ -300,7 +353,7 @@ test("用戶錯誤提示跟隨語言，自訂提示只覆蓋部署語言，封�
   db.database.exec("UPDATE users SET blocked = 1");
   await processUpdate({ message: userMessage(12, { text: "blocked" }) }, env);
   assert.equal(calls.at(-1).payload.text, t("en", "blockedNotice"));
-  await processUpdate({ message: userMessage(13, { text: "/language ja" }) }, env);
+  await processUpdate(languageCallback(13, "lang:ja:0:12"), env);
   assert.equal((await db.prepare("SELECT blocked FROM users").first()).blocked, 1);
   db.database.exec("UPDATE users SET blocked = 0, last_message_at = 0, language = 'en'");
   failCopy = true;
@@ -338,15 +391,15 @@ test("使用者可自行啟用按鈕回調，不依賴管理者先更新選單�
     return telegramResponse(method === "getWebhookInfo" ? webhook : { message_id: 11 });
   };
   await processUpdate({ message: userMessage(10, { text: "/start" }) }, env);
-  assert.deepEqual(calls.map((call) => call.method), ["getWebhookInfo", "setWebhook", "sendMessage"]);
+  assert.deepEqual(calls.map((call) => call.method), ["getWebhookInfo", "setWebhook", "setMyCommands", "sendMessage"]);
   const choice = calls.at(-1).payload.reply_markup.inline_keyboard[0][1].callback_data;
   calls.length = 0;
   await processUpdate(languageCallback(11, choice), env);
   assert.equal(calls[0].method, "answerCallbackQuery");
   assert.equal((await db.prepare("SELECT language FROM users").first()).language, "en");
   calls.length = 0;
-  await processUpdate({ message: userMessage(12, { text: "/language" }) }, env);
-  assert.deepEqual(calls.map((call) => call.method), ["sendMessage"]);
+  await processUpdate({ message: userMessage(12, { text: "/start" }) }, env);
+  assert.deepEqual(calls.map((call) => call.method), ["setMyCommands", "sendMessage"]);
 }));
 
 test("初始化寫入暫時失敗後，相簿可由下一次重試完成", () => withDatabaseMock(async (db) => {
@@ -396,36 +449,17 @@ test("清除確認後，先前仍在轉送的訊息不能重建對照", () => wi
   const env = auditEnv(db, false);
   const inflight = processUpdate({ message: userMessage(10) }, env);
   await entered;
-  await processUpdate({ message: userMessage(11, { text: "/forget confirm" }) }, env);
+  await eraseAuditUser(db, 11);
   releaseCopy(); await inflight;
   assert.equal((await db.prepare("SELECT COUNT(*) AS total FROM message_map").first()).total, 0);
   assert.deepEqual(deleted, [700]);
   assert.equal((await db.prepare("SELECT erased FROM users").first()).erased, 1);
 }));
 
-test("清除回覆失敗的重試不會刪掉之後的新資料", () => withDatabaseMock(async (db) => {
-  seedAuditUser(db);
-  let failConfirmation = true;
-  globalThis.fetch = async (url, init) => {
-    const payload = JSON.parse(init.body);
-    if (String(url).endsWith("/sendMessage") && payload.text === t("zh", "forgetDone") && failConfirmation) {
-      failConfirmation = false; return telegramResponse(false, 503);
-    }
-    if (String(url).endsWith("/createForumTopic")) return telegramResponse({ message_thread_id: 73 });
-    return telegramResponse({ message_id: 700 });
-  };
-  const env = auditEnv(db), forget = userMessage(20, { text: "/forget confirm" });
-  assert.equal((await worker.fetch(auditRequest(7002, forget), env)).status, 500);
-  await processUpdate({ message: userMessage(21) }, env);
-  assert.equal((await worker.fetch(auditRequest(7002, forget), env)).status, 200);
-  assert.equal((await db.prepare("SELECT COUNT(*) AS total FROM message_map").first()).total, 1);
-  assert.equal((await db.prepare("SELECT erased FROM users").first()).erased, 0);
-}));
-
 test("清除前尚未開始處理的舊訊息不能重建個人資料", () => withDatabaseMock(async (db) => {
   globalThis.fetch = async () => telegramResponse({ message_id: 700 });
   const env = auditEnv(db, false);
-  await processUpdate({ message: userMessage(30, { text: "/forget confirm" }) }, env);
+  await eraseAuditUser(db, 30);
   await processUpdate({ message: userMessage(29) }, env);
   const user = await db.prepare("SELECT * FROM users").first();
   assert.equal(user.erased, 1);
@@ -728,7 +762,7 @@ test("管理者 /start 更新使用者選單，管理指令仍只對本人可見
   assert.deepEqual(menus[1].payload.commands.map((item) => item.command),
     ["help", "status", "user", "block", "unblock", "close"]);
   assert.deepEqual(menus[2].payload.scope, { type: "all_private_chats" });
-  assert.deepEqual(menus[2].payload.commands.map((item) => item.command), ["start", "help", "language", "id", "forget"]);
+  assert.deepEqual(menus[2].payload.commands.map((item) => item.command), ["start"]);
   calls.length = 0;
   await processUpdate({ message: {
     message_id: 2, chat: { id: 1, type: "private" },
@@ -770,52 +804,6 @@ test("管理者 /status 顯示近 24 小時更新與 Webhook 待處理數", () =
     from: { id: 1, is_bot: false }, text: "/status"
   } }, { ...env, ADMIN_GROUP_ID: "-1001" });
   assert.equal(calls.filter((call) => call.method === "getWebhookInfo").length, 2);
-}));
-
-test("/forget 需確認並清除路由資料，封鎖者保留最小封鎖紀錄", () => withDatabaseMock(async (db) => {
-  const sent = [];
-  globalThis.fetch = async (_url, init) => {
-    sent.push(JSON.parse(init.body));
-    return telegramResponse({ message_id: sent.length });
-  };
-  for (const [id, blocked] of [["2", 0], ["3", 1]]) {
-    await db.prepare(`INSERT INTO users(user_id, username, first_name, blocked, topic_id,
-      created_at, updated_at) VALUES (?, 'old_name', 'Old Name', ?, ?, 1, 1)`)
-      .bind(id, blocked, Number(id) + 70).run();
-    await db.prepare(`INSERT INTO message_map(source_chat_id, source_message_id,
-      target_chat_id, target_message_id, user_id, created_at)
-      VALUES (?, 10, '-1001', ?, ?, 1)`).bind(id, Number(id) + 70, id).run();
-    await db.prepare(`INSERT INTO media_groups(source_chat_id, media_group_id, user_id,
-      direction, state, updated_at_ms, created_at)
-      VALUES (?, 'album', ?, 'user_to_admin', 'done', 1, 1)`).bind(id, id).run();
-    await db.prepare(`INSERT INTO media_group_messages(source_chat_id, media_group_id,
-      message_id, created_at) VALUES (?, 'album', 11, 1)`).bind(id).run();
-  }
-  const env = { BOT_TOKEN: "test-token", ADMIN_USER_ID: "1", BOT_DB: db, CAPTCHA_ENABLED: "false" };
-  await processUpdate({ message: userMessage(1, { text: "/forget" }) }, env);
-  assert.equal((await db.prepare("SELECT username FROM users WHERE user_id = '2'").first()).username, "old_name");
-  await processUpdate({ message: userMessage(2, { text: "/forget confirm" }) }, env);
-  await processUpdate({ message: userMessage(3, {
-    chat: { id: 3, type: "private" }, from: { id: 3, is_bot: false }, text: "/forget confirm"
-  }) }, env);
-  const erased = await db.prepare("SELECT * FROM users WHERE user_id = '2'").first();
-  assert.equal(erased.erased, 1);
-  assert.equal(erased.first_name, "");
-  assert.equal(erased.topic_id, null);
-  const blocked = await db.prepare("SELECT * FROM users WHERE user_id = '3'").first();
-  assert.equal(blocked.blocked, 1);
-  assert.equal(blocked.username, null);
-  assert.equal(blocked.first_name, "");
-  assert.equal(blocked.topic_id, null);
-  assert.match(sent.at(-1).text, /清除資料不會解除封鎖/);
-  await processUpdate({ message: {
-    message_id: 4, chat: { id: 1, type: "private" },
-    from: { id: 1, is_bot: false }, text: "/unblock 3"
-  } }, env);
-  assert.equal((await db.prepare("SELECT * FROM users WHERE user_id = '3'").first()).blocked, 0);
-  for (const table of ["message_map", "media_groups", "media_group_messages"]) {
-    assert.equal((await db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).first()).count, 0);
-  }
 }));
 
 test("使用者歡迎訊息依部署語言，不依 Telegram 使用者語言", () => withDatabaseMock(async (db) => {
@@ -1353,7 +1341,7 @@ test("三語使用者 /help 只讀取一次語言偏好，不寫入、不轉送�
       assert.doesNotMatch(calls[0].payload.text, /\/(block|unblock|status)\b/);
       assert.equal((await db.prepare("SELECT COUNT(*) AS total FROM users").first()).total, 0);
       await processUpdate({ message: userMessage(2001, { text: "/start" }) }, auditEnv(db));
-      assert.equal(calls.filter((call) => call.method === "setMyCommands").length, 0);
+      assert.equal(calls.filter((call) => call.method === "setMyCommands").length, 1);
     });
   }
 });
@@ -1370,8 +1358,8 @@ test("預設使用者選單按部署語言註冊，語言選項標示三語且�
         { ...auditEnv(db), BOT_LANGUAGE: language });
       const menus = calls.filter((call) => call.method === "setMyCommands");
       const userMenu = menus.find((call) => call.payload.scope.type === "all_private_chats");
-      assert.deepEqual(userMenu.payload.commands, ["start", "help", "language", "id", "forget"].map((command) => ({
-        command, description: command === "language" ? "中文 / English / 日本語" : t(language, `userCommand_${command}`)
+      assert.deepEqual(userMenu.payload.commands, ["start"].map((command) => ({
+        command, description: t(language, `userCommand_${command}`)
       })));
       assert.equal(menus.filter((call) => call.payload.commands.some((item) => item.command === "block"))
         .every((call) => call.payload.scope.user_id === 1 || call.payload.scope.chat_id === "1"), true);
@@ -1414,7 +1402,7 @@ test("清除後的舊話題回覆會提示失效，不重建個人資料或路�
     calls.push({ method: String(url).split("/").pop(), payload: JSON.parse(init.body) });
     return telegramResponse(true);
   };
-  await processUpdate({ message: userMessage(2030, { text: "/forget confirm" }) }, auditEnv(db));
+  await eraseAuditUser(db, 2030);
   calls.length = 0;
   await processUpdate({ message: adminMessage(2031, "舊話題回覆", {
     chat: { id: -1001, type: "supergroup", is_forum: true }, message_thread_id: 72
@@ -1826,7 +1814,7 @@ test("答題併發清除或封鎖時不能通過驗證，也不能由舊更新�
       if (/UPDATE users SET captcha_verified = 1/.test(sql)) {
         const run = statement.run.bind(statement);
         statement.run = async () => {
-          if (erase) await processUpdate({ message: userMessage(20, { text: "/forget confirm" }) }, env);
+          if (erase) await eraseAuditUser(db, 20);
           else db.database.exec("UPDATE users SET blocked=1 WHERE user_id='2'");
           return run();
         };
@@ -1892,7 +1880,7 @@ test("驗證前 /id 不建資料，清除後舊答案無效且新聯絡必須重
   await processUpdate({ message: userMessage(10, { text: "首次聯絡" }) }, env);
   const answer = String(captchaQuestion((await db.prepare("SELECT captcha_code FROM users").first()).captcha_code).answer);
   await processUpdate({ message: userMessage(11, { text: answer }) }, env);
-  await processUpdate({ message: userMessage(20, { text: "/forget confirm" }) }, env);
+  await eraseAuditUser(db, 20);
   await processUpdate({ message: userMessage(11, { text: answer }) }, env);
   let user = await db.prepare("SELECT * FROM users").first();
   assert.equal(user.captcha_verified, 0);
@@ -2139,7 +2127,7 @@ test("首次自動轉送期間清除資料會撤回副本，待送參照與路�
   let rollbacks = 0;
   globalThis.fetch = async (url) => {
     if (String(url).endsWith("/copyMessages")) {
-      await processUpdate({ message: userMessage(20, { text: "/forget confirm" }) }, env);
+      await eraseAuditUser(db, 20);
       return telegramResponse([{ message_id: 700 }]);
     }
     if (String(url).endsWith("/deleteMessages")) rollbacks++;

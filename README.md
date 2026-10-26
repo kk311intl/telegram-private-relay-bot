@@ -22,9 +22,9 @@ Version: v1.3.1 · License: [GPL-3.0-only](LICENSE)
 >
 > 遵守下方公開內容規則。Token 僅透過本機安全輸入或 Secret 欄位處理，不放入聊天、輸出或 Git；私有資料留在受 Git 忽略的位置。未經我要求，不覆寫既有設定、重建資源、輪替憑證、刪除還原備份、改寫程式、推送 GitHub 或建立 Release／tag。
 >
-> 首次聯絡的算術驗證預設開啟，除非我要求才關閉。升級時先套用所有待執行的資料庫遷移，並用測試帳號確認 `/start` 顯示歡迎與語言按鈕、`/language` 可切換並保存三語偏好、首則內容才出題，通過後自動轉送。
+> 首次聯絡的算術驗證預設開啟，除非我要求才關閉。升級時先套用所有待執行的資料庫遷移，並用測試帳號確認 `/start` 顯示歡迎與語言按鈕、歡迎訊息的按鈕可切換並保存三語偏好、首則內容才出題，通過後自動轉送。
 >
-> 最後檢查 `/health`、`/ready`、Webhook 和安全探針，指導我用非管理者帳號完成私訊往返測試。管理者私訊 `/start` 設定選單，再用 `/status` 確認；清除功能只用測試帳號。遇到阻礙時說明原因及下一個操作，不把未驗證項目當作完成。交付 Bot 連結、Worker 網址、模式、語言、驗證結果與憑證保管位置，不顯示秘密值。
+> 最後檢查 `/health`、`/ready`、Webhook 和安全探針，指導我用非管理者帳號完成私訊往返測試。管理者私訊 `/start` 設定選單，再用 `/status` 確認。遇到阻礙時說明原因及下一個操作，不把未驗證項目當作完成。交付 Bot 連結、Worker 網址、模式、語言、驗證結果與憑證保管位置，不顯示秘密值。
 
 ### 準備
 
@@ -110,8 +110,6 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 | 使用位置 | 指令 | 用途 |
 |---|---|---|
 | 使用者私訊 Bot | `/start`、`/help`、`/id` | 歡迎訊息、使用說明、自己的 User ID |
-| 使用者私訊 Bot | `/language` | 選擇中文、English、日本語；亦可用 `/language zh`、`/language en`、`/language ja` |
-| 使用者私訊 Bot | `/forget`、`/forget confirm` | 查看清除說明、確認清除資料 |
 | 管理者私訊 Bot | `/start`、`/help`、`/status` | 設定選單、查指令、查近 24 小時處理狀態與 Webhook 待處理數 |
 | 管理者私訊 Bot | `/unblock USER_ID` | 依 ID 解封，包括已清除資料的封鎖者 |
 | 管理者私訊 Bot | `/captcha`、`/captcha on`、`/captcha off` | 查看、開啟或關閉首次聯絡驗證 |
@@ -120,7 +118,7 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 
 管理權限只認 `ADMIN_USER_ID`。管理者私訊 `/start` 更新預設使用者選單及本人可見的管理選單，並為一般 HTTPS Webhook 補訂閱 `callback_query`；自訂憑證的 Webhook 須自行更新訂閱。選單不會在每則訊息重設。
 
-使用者 `/start` 的按鈕與 `/language` 都可選語言，偏好與個別指令選單會保存；`/help` 只讀取偏好，不寫入或轉送給管理者。未選擇時沿用部署預設，不依 Telegram 語言自動切換。正常聊天重用既有使用者查詢，不多讀寫 D1；只在主動切換時保存偏好。`/forget confirm` 也會清除偏好與個別選單。升級前須套用 `0007_user_language.sql`。用戶開啟語言選單時也會自動確認按鈕訂閱，每個暖 Worker 只檢查一次；管理者 `/start` 用於更新預設指令選單。
+一般用戶的指令選單只顯示 `/start`，歡迎訊息下的按鈕可選中文、English、日本語；偏好會保存。每次 `/start` 也更新本人選單，移除舊項目；`/help` 與 `/id` 仍可直接輸入。未選語言時沿用部署預設，不依 Telegram 語言自動切換。正常聊天重用既有使用者查詢，不多讀寫 D1；只在選語言時保存偏好。升級前套用 `0007_user_language.sql`。開啟歡迎訊息時會自動確認按鈕訂閱，每個暖 Worker 只檢查一次；管理者 `/start` 更新預設選單及管理選單。
 
 `/close` 只關閉話題，不封鎖使用者；新訊息會優先重開原話題，找不到話題才另建。要停止接收訊息請用 `/block`。管理者回覆失效對照、舊話題或錯誤位置時會收到「未送出」提示；話題無法發送提示時改私訊管理者。
 
@@ -128,7 +126,7 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 
 ### 首次聯絡驗證
 
-`/start` 顯示歡迎與語言按鈕，不出題也不免除驗證。新聯絡者傳第一則內容時，Bot 才說明為了攔截自動化廣告而要求算術驗證。5 分鐘內只回覆數字，除法都是整數；連錯 3 次暫停 15 分鐘。一般錯誤至少間隔 5 秒才計次及回覆；冷卻中的內容忽略。`/help`、`/language`、`/id`、`/forget` 仍可使用；切換語言不重置題目或錯誤次數。
+`/start` 顯示歡迎與語言按鈕，不出題也不免除驗證。新聯絡者傳第一則內容時，Bot 才說明為了攔截自動化廣告而要求算術驗證。5 分鐘內只回覆數字，除法都是整數；連錯 3 次暫停 15 分鐘。一般錯誤至少間隔 5 秒才計次及回覆；冷卻中的內容忽略。`/help`、`/id` 仍可直接輸入；切換語言不重置題目或錯誤次數。
 
 通過前只暫存第一則訊息的 Telegram ID；若是相簿，暫存同組最多 10 個 ID，不保存文字或媒體本體，也不建立話題。通過後自動轉送第一則內容或首組相簿，不必重送；答案與其他未驗證訊息不補送。題目過期或錯誤過多時清除待送紀錄，之後須重新傳送聯絡內容。暫存參照沿用原有相簿紀錄的清理週期。
 
@@ -142,7 +140,7 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 
 D1 保存路由所需的 User ID、顯示名稱／使用者名稱、話題／訊息 ID、語言偏好與處理狀態，不保存訊息文字或媒體本體。管理端會看到使用者基本資料，這不是匿名服務；話題也不是獨立閱讀權限，管理群組只應加入可信任成員。
 
-使用者傳 `/forget` 會先看到確認說明，只有傳 `/forget confirm` 才清除 Bot 的 D1 個人資料、相簿暫存及轉送對照。為防止舊請求重建資料，Bot 暫留不含顯示名稱的控制紀錄；非封鎖者的紀錄會在 7 天後依排程清理。被封鎖者的 ID、封鎖狀態與控制紀錄仍保留，管理者可私訊 Bot 傳送 `/unblock USER_ID` 解封。這**不會刪除 Telegram 兩端已有的聊天訊息或既有備份**；之後的新訊息可能重新建立資料。`/status` 也顯示處理中與處理逾時，但不能替代真人收發測試。
+儲存資料由部署者管理；Bot 不提供使用者自行清除資料的指令。Telegram 兩端已有的聊天訊息與既有備份需另行管理。封鎖狀態保留至管理者解除；`/status` 不能替代真人收發測試。
 
 超過 30 天的轉送對照會在下一次排程清理刪除；對照過期後，舊訊息編輯及管理者私訊模式的回覆可能無法路由。若 Telegram 已轉送卻沒有返回結果，重試仍可能重複送達；先核對兩端再決定重送。保存對照失敗時會重試保存，再嘗試撤回副本；兩者都失敗則停止自動重送並提示發送者。
 
@@ -189,9 +187,9 @@ Telegram の個別チャットを管理者へ転送し、Bot を通して返信�
 >
 > 下の公開ルールを守り、Token はローカルの安全な入力か Secret 欄だけで扱い、チャット・出力・Git に含めないでください。私有データは Git の対象外に置きます。依頼なしに既存設定の上書き、リソースの再作成、認証情報の更新、復旧用バックアップの削除、コード変更、GitHub への push、Release／tag の作成をしないでください。
 >
-> 初回の計算確認は既定で有効にし、私が依頼した場合だけ無効にしてください。未適用のデータベース移行を先に適用し、テストアカウントで `/start` の案内と言語ボタン、`/language` による3言語の選択と保存、最初の内容での問題表示、確認後の自動転送を試してください。
+> 初回の計算確認は既定で有効にし、私が依頼した場合だけ無効にしてください。未適用のデータベース移行を先に適用し、テストアカウントで `/start` の案内と言語ボタン、歓迎メッセージのボタンによる3言語の選択と保存、最初の内容での問題表示、確認後の自動転送を試してください。
 >
-> 最後に `/health`、`/ready`、Webhook、安全なプローブを確認し、管理者以外のアカウントで送信と返信を試せるよう案内してください。管理者には Bot との個別チャットで `/start` と `/status` を使ってもらい、消去機能はテスト用アカウントだけで確認してください。止まったら理由と次の操作を説明し、未確認の項目を完了扱いにしないでください。Bot のリンク、Worker URL、モード、言語、検証結果、認証情報の保管場所をまとめ、秘密の値は表示しないでください。
+> 最後に `/health`、`/ready`、Webhook、安全なプローブを確認し、管理者以外のアカウントで送信と返信を試せるよう案内してください。管理者には Bot との個別チャットで `/start` と `/status` を使ってもらい。止まったら理由と次の操作を説明し、未確認の項目を完了扱いにしないでください。Bot のリンク、Worker URL、モード、言語、検証結果、認証情報の保管場所をまとめ、秘密の値は表示しないでください。
 
 ### 必要なもの
 
@@ -277,8 +275,6 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 | 使用場所 | コマンド | 用途 |
 |---|---|---|
 | Bot との個別チャット（ユーザー） | `/start`、`/help`、`/id` | 開始時のメッセージ、使い方、自分の User ID |
-| Bot との個別チャット（ユーザー） | `/language` | 中文・English・日本語を選択。`/language zh`、`/language en`、`/language ja` でも指定可 |
-| Bot との個別チャット（ユーザー） | `/forget`、`/forget confirm` | 消去の説明、消去の確認 |
 | Bot との個別チャット（管理者） | `/start`、`/help`、`/status` | メニュー設定、コマンド案内、過去24時間の処理状況と Webhook 保留件数 |
 | Bot との個別チャット（管理者） | `/unblock USER_ID` | ID による解除。消去済みのブロックユーザーも対象 |
 | Bot との個別チャット（管理者） | `/captcha`、`/captcha on`、`/captcha off` | 初回の確認の状態表示、有効化、無効化 |
@@ -287,7 +283,7 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 
 管理権限は `ADMIN_USER_ID` だけで判定します。管理者が `/start` を個別チャットすると、既定のユーザー用メニューと本人専用の管理メニューを更新し、通常の HTTPS Webhook に `callback_query` を追加します。独自の証明書を使う Webhook は手動で更新してください。メニューはメッセージごとに設定し直しません。
 
-ユーザーは `/start` のボタンか `/language` で言語を選び、設定と個別コマンドメニューを保存できます。`/help` は設定を読むだけで、書き込みや管理者への転送は行いません。未選択時はデプロイの既定値を使い、Telegram の言語では自動切り替えしません。通常の会話は既存のユーザー照会を使い、D1 の追加読み書きはありません。`/forget confirm` は言語と個別メニューも消去します。更新前に `0007_user_language.sql` を適用してください。ユーザーが言語メニューを開く際にもボタンの受信設定を自動確認し、稼働中の Worker ごとに一度だけ照会します。管理者の `/start` は既定コマンドメニューの更新に使います。
+ユーザーのコマンドメニューは `/start` のみです。案内のボタンで中文・English・日本語を選び、設定を保存できます。`/start` は本人の古いメニューも更新します。`/help` と `/id` は直接入力できます。未選択時はデプロイの既定値を使い、Telegram の言語では自動切り替えしません。通常の会話は既存のユーザー照会を使い、D1 の追加読み書きはありません。更新前に `0007_user_language.sql` を適用してください。案内表示時にボタンの受信設定を自動確認し、稼働中の Worker ごとに一度だけ照会します。管理者の `/start` は既定メニューと管理メニューを更新します。
 
 `/close` はトピックを閉じるだけで、ユーザーをブロックしません。新着時は元のトピックを再開し、見つからない場合にのみ新規作成します。受信を止めるには `/block` を使ってください。失効した対応情報、古いトピック、誤った場所への管理者の返信には未送信の案内を返します。トピックに案内を送れない場合は管理者へ個別送信します。
 
@@ -295,7 +291,7 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 
 ### 初回の確認
 
-`/start` は案内と言語ボタンを表示し、問題は出さず確認も免除しません。新しい連絡者が最初の内容を送ると、自動広告を防ぐための計算確認を案内します。5分以内に数字だけで答え、割り算は割り切れます。3回間違えると15分間待ちます。誤答への応答と計数は最低5秒間隔で、待機中の内容は無視します。`/help`、`/language`、`/id`、`/forget` は引き続き使えます。言語変更で問題や誤答回数はリセットされません。
+`/start` は案内と言語ボタンを表示し、問題は出さず確認も免除しません。新しい連絡者が最初の内容を送ると、自動広告を防ぐための計算確認を案内します。5分以内に数字だけで答え、割り算は割り切れます。3回間違えると15分間待ちます。誤答への応答と計数は最低5秒間隔で、待機中の内容は無視します。`/help` と `/id` は直接入力できます。言語変更で問題や誤答回数はリセットされません。
 
 確認前は最初のメッセージの Telegram ID、アルバムなら同じ組の最大10件の ID のみ一時保存します。本文やメディア本体は保存せず、トピックも作りません。確認後に最初の内容またはアルバムを自動転送するため、再送は不要です。答えや他の未確認メッセージは転送しません。期限切れや誤答上限では待機記録を消し、連絡内容の再送が必要です。一時参照は既存のアルバム記録の定期処理で削除します。
 
@@ -309,7 +305,7 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 
 D1 には転送に必要な User ID、表示名／ユーザー名、トピック／メッセージ ID、言語設定、処理状況を保存し、本文やメディア本体は保存しません。管理側にはユーザーの基本情報が表示され、匿名サービスではありません。トピックは独立した閲覧権限でもないため、管理グループには信頼できるメンバーだけを招待してください。
 
-ユーザーが `/forget` を送ると確認方法が表示され、`/forget confirm` を送った場合にのみ Bot の D1 に保存された個人情報、アルバムの一時データ、メッセージの対応情報が消去されます。表示名を含まない再作成防止の記録を一時保持し、ブロックされていないユーザーの記録は7日後の定期処理で削除します。ブロック中の ID、ブロック状態、記録は残り、管理者は Bot との個別チャットで `/unblock USER_ID` を送って解除できます。**Telegram の既存メッセージとバックアップは削除されません**。以後の新しいメッセージは情報を再作成する場合があります。`/status` は処理中と処理期限切れも表示しますが、実際の送受信テストの代わりにはなりません。
+保存データはデプロイした管理者が管理し、ユーザー自身による消去コマンドはありません。Telegram の既存メッセージやバックアップは別途管理してください。ブロックは管理者が解除するまで保持します。`/status` は実際の送受信テストの代わりにはなりません。
 
 30 日を超えたメッセージの対応情報は次の定期クリーンアップで削除します。対応が失効すると古いメッセージの編集や管理者個別チャットモードの返信を転送できない場合があります。Telegram のコピー実行後に応答が失われると再試行で重複する可能性があるため、再送前に両側を確認してください。対応の保存は再試行し、失敗時はコピーの取り消しを試みます。両方失敗すると自動再送を止め、送信者に通知します。
 
@@ -356,9 +352,9 @@ Give the repository link and this prompt to an AI coding assistant that can read
 >
 > Follow the public-content rules below. Handle tokens only through secure local input or Secret fields, never chat, output, or Git; keep private data in Git-ignored locations. Without my request, do not overwrite existing settings, recreate resources, rotate credentials, delete recovery backups, change source code, push to GitHub, or create a Release/tag.
 >
-> Keep the first-contact arithmetic check enabled unless I request otherwise. Apply all pending database migrations before upgrading. With a test account, verify the welcome and language buttons on `/start`, three saved language choices via `/language`, the check on the first contact message, and automatic relay after passing.
+> Keep the first-contact arithmetic check enabled unless I request otherwise. Apply all pending database migrations before upgrading. With a test account, verify the welcome and language buttons on `/start`, all three saved language choices on `/start`, the check on the first contact message, and automatic relay after passing.
 >
-> Verify `/health`, `/ready`, webhook status, and the safe runtime probe, then guide me through a real send-and-reply test with a non-admin account. Have the admin send `/start` and `/status` privately to the bot; use only test accounts for erasure. If blocked, explain why and give my next action; do not report unverified work as complete. Finish with the bot link, Worker URL, mode, language, checks, and credential storage location, without secret values.
+> Verify `/health`, `/ready`, webhook status, and the safe runtime probe, then guide me through a real send-and-reply test with a non-admin account. Have the admin send `/start` and `/status` privately to the bot. If blocked, explain why and give my next action; do not report unverified work as complete. Finish with the bot link, Worker URL, mode, language, checks, and credential storage location, without secret values.
 
 ### Requirements
 
@@ -444,8 +440,6 @@ Users message the bot privately. The admin replies in the matching topic or, in 
 | Where | Commands | Purpose |
 |---|---|---|
 | User's private chat with the bot | `/start`, `/help`, `/id` | Welcome message, instructions, own User ID |
-| User's private chat with the bot | `/language` | Choose 中文, English, or 日本語; also accepts `/language zh`, `/language en`, `/language ja` |
-| User's private chat with the bot | `/forget`, `/forget confirm` | Erasure instructions, confirmed erasure |
 | Admin's private chat with the bot | `/start`, `/help`, `/status` | Set command menu, show help, see 24-hour processing and webhook pending count |
 | Admin's private chat with the bot | `/unblock USER_ID` | Unblock by ID, including blocked users who erased their data |
 | Admin's private chat with the bot | `/captcha`, `/captcha on`, `/captcha off` | Show, enable, or disable the first-contact check |
@@ -454,7 +448,7 @@ Users message the bot privately. The admin replies in the matching topic or, in 
 
 Only `ADMIN_USER_ID` grants admin access. The admin sends `/start` privately to refresh the default user menu and their private admin menus, and subscribe standard HTTPS webhooks to `callback_query`. Webhooks with a custom certificate need a manual subscription update. Menus are not reset on every message.
 
-Users can choose a language through the `/start` buttons or `/language`; their preference and private command menu are saved. `/help` only reads the preference, without writes or relaying to the admin. Users without a choice use the deployment default, regardless of Telegram language. Normal chat reuses existing user queries with no extra D1 reads or writes; preferences are saved only on explicit selection. `/forget confirm` also clears the preference and private menu. Apply `0007_user_language.sql` before upgrading. Opening a user language menu also checks button subscriptions once per warm Worker; the admin's `/start` refreshes the default command menus.
+The user command menu contains only `/start`. Buttons below the welcome message select 中文, English, or 日本語 and save the choice. Each `/start` also replaces that user's old menu. `/help` and `/id` remain available by typing them. Users without a choice use the deployment default, regardless of Telegram language. Normal chat reuses existing user queries with no extra D1 reads or writes. Apply `0007_user_language.sql` before upgrading. Opening the welcome message checks button subscriptions once per warm Worker; the admin's `/start` refreshes default and admin menus.
 
 `/close` closes a topic without blocking the user. New messages reopen the original topic; a new topic is created only if the old one cannot be found. Use `/block` to stop accepting messages. Admin replies with expired mappings, in old topics, or in the wrong place receive a not-sent notice. If the topic cannot receive that notice, it is sent privately to the admin.
 
@@ -462,7 +456,7 @@ Users can choose a language through the `/start` buttons or `/language`; their p
 
 ### First-contact check
 
-`/start` shows the welcome and language buttons, without a question or a verification exemption. A new contact's first content message triggers an arithmetic check explaining that it reduces automated ads. Reply with digits only within 5 minutes; division always has an integer answer. Three wrong answers require a 15-minute wait. Wrong attempts and responses are spaced at least 5 seconds apart, and content during the cooldown is ignored. `/help`, `/language`, `/id`, and `/forget` remain available; changing language does not reset the question or wrong attempts.
+`/start` shows the welcome and language buttons, without a question or a verification exemption. A new contact's first content message triggers an arithmetic check explaining that it reduces automated ads. Reply with digits only within 5 minutes; division always has an integer answer. Three wrong answers require a 15-minute wait. Wrong attempts and responses are spaced at least 5 seconds apart, and content during the cooldown is ignored. `/help` and `/id` remain available by typing them; changing language does not reset the question or wrong attempts.
 
 Before passing, only the first message's Telegram ID is staged, or up to 10 IDs belonging to the first album. No text or media content is stored and no topic is created. Passing automatically relays that first message or album, without resending. Answers and other unverified messages are not replayed. Expiry or too many wrong answers clears the pending references, requiring a new contact message. Temporary references use the existing album cleanup cycle.
 
@@ -476,7 +470,7 @@ This reduces simple automated ads; programs that solve arithmetic and people can
 
 D1 stores routing-related User IDs, display names/usernames, topic/message IDs, language preferences, and processing state, not message text or media content. The admin sees basic user information; this is not an anonymous service. Topics are not separate read-access boundaries, so invite only trusted members to the admin group.
 
-Sending `/forget` shows confirmation instructions; only `/forget confirm` erases personal data, album staging, and relay mappings stored in the bot's D1. Records without display names prevent old requests from restoring data; unblocked users' records are removed by scheduled cleanup after 7 days. Blocked IDs, blocked state, and their records remain; the admin can send `/unblock USER_ID` in their private chat with the bot. This **does not delete existing Telegram messages or backups**. Later new messages may create data again. `/status` also shows processing updates and timeouts, but is not a substitute for a real two-way delivery test.
+Stored data is managed by the deployment owner; there is no user self-service erasure command. Existing Telegram messages and backups are managed separately. Blocks remain until the admin removes them. `/status` does not replace a real send-and-reply test.
 
 Mappings older than 30 days are removed at the next scheduled cleanup. Once a mapping expires, old-message edits or replies in admin private-chat mode may no longer be routable. If Telegram copies a message but its response is lost, retrying can still deliver a duplicate; check both sides before resending. Mapping saves are retried, then the bot tries to remove the copy. If both fail, it stops automatic resending and notifies the sender.
 

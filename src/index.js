@@ -327,38 +327,6 @@ async function processUserMessage(message, env) {
     });
     return;
   }
-  if (command === "forget") {
-    const confirmed = /^\/forget(?:@[A-Za-z0-9_]+)?\s+confirm\s*$/i.test(message.text.trim());
-    if (confirmed) {
-      await forgetUser(env.BOT_DB, userId, message.message_id, now);
-      const current = await getUser(env.BOT_DB, userId);
-      if (!current?.language && current?.forgotten_message_id === message.message_id) {
-        await telegram(env, "deleteMyCommands", { scope: { type: "chat", chat_id: message.chat.id } });
-      }
-    }
-    await telegram(env, "sendMessage", {
-      chat_id: message.chat.id,
-      text: userText(env, confirmed ? "forgetDone" : "forgetConfirm")
-    });
-    return;
-  }
-
-  if (message.message_id <= (user?.forgotten_message_id || 0)) return;
-  if (command === "language") {
-    const selected = /^\/language(?:@[A-Za-z0-9_]+)?\s+(zh|en|ja)\s*$/i.exec(message.text.trim())?.[1].toLowerCase();
-    if (selected) {
-      return saveUserLanguage(message.chat.id, selected, message.message_id, message.message_id,
-        user?.generation || 0, env);
-    }
-    await ensureLanguageCallbacks(env);
-    await telegram(env, "sendMessage", {
-      chat_id: message.chat.id,
-      text: "選擇語言 / Choose a language / 言語を選択",
-      reply_markup: languageKeyboard(message, user)
-    });
-    return;
-  }
-
   if (user?.blocked) {
     if (await claimBlockedNotice(env.BOT_DB, userId, now)) {
       try {
@@ -377,11 +345,18 @@ async function processUserMessage(message, env) {
   if (message.message_id <= (user?.forgotten_message_id || 0)) return;
   if (command === "start") {
     await ensureLanguageCallbacks(env);
+    await telegram(env, "setMyCommands", {
+      scope: { type: "chat", chat_id: message.chat.id }, commands: userCommands(env._userLanguage)
+    });
     await telegram(env, "sendMessage", {
       chat_id: message.chat.id,
       text: userText(env, "welcome", "WELCOME_MESSAGE"),
       reply_markup: languageKeyboard(message, user)
     });
+    return;
+  }
+  if (command) {
+    await telegram(env, "sendMessage", { chat_id: message.chat.id, text: userText(env, "unknownCommand") });
     return;
   }
   if (user?.captcha_verified && user.captcha_pending_group) {
@@ -477,10 +452,7 @@ function userText(env, key, override) {
 }
 
 function userCommands(language) {
-  return ["start", "help", "language", "id", "forget"].map((command) => ({
-    command,
-    description: command === "language" ? "中文 / English / 日本語" : t(language, `userCommand_${command}`)
-  }));
+  return [{ command: "start", description: t(language, "userCommand_start") }];
 }
 
 function languageKeyboard(message, user) {
@@ -713,9 +685,8 @@ async function processCaptcha(message, user, env, now) {
     return;
   }
 
-  const reminder = Boolean(parseCommand(message.text));
-  if (user.captcha_last_at > now - (reminder ? 60 : 5)) return;
-  const attempts = user.captcha_attempts + (reminder ? 0 : 1);
+  if (user.captcha_last_at > now - 5) return;
+  const attempts = user.captcha_attempts + 1;
   const result = await db.prepare(`
     UPDATE users SET captcha_attempts = ?, captcha_until = ?, captcha_last_at = ?,
       captcha_message_id = ?, updated_at = ?
@@ -727,40 +698,8 @@ async function processCaptcha(message, user, env, now) {
     now, user.captcha_attempts, user.captcha_last_at, message.message_id, message.message_id).run();
   if (Number(result.meta?.changes || 0) === 1) {
     if (attempts >= 3) await clearCaptchaPending(db, { ...user, captcha_message_id: message.message_id });
-    await send(attempts >= 3 ? "captchaLocked" : reminder ? "captchaPrompt" : "captchaWrong");
+    await send(attempts >= 3 ? "captchaLocked" : "captchaWrong");
   }
-}
-
-async function forgetUser(db, userId, messageId, now) {
-  await db.batch([
-    db.prepare(`
-      INSERT OR IGNORE INTO users(user_id, created_at, updated_at, erased)
-      VALUES (?, ?, ?, 1)
-    `).bind(userId, now, now),
-    db.prepare(`
-      DELETE FROM media_group_messages WHERE (source_chat_id = ? OR EXISTS (
-        SELECT 1 FROM media_groups AS groups
-        WHERE groups.user_id = ?
-          AND groups.source_chat_id = media_group_messages.source_chat_id
-          AND groups.media_group_id = media_group_messages.media_group_id
-      ))
-        AND EXISTS (SELECT 1 FROM users WHERE user_id = ? AND forgotten_message_id < ?)
-    `).bind(userId, userId, userId, messageId),
-    ...["media_groups", "message_map", "rate_admissions"].map((table) => db.prepare(`
-      DELETE FROM ${table} WHERE user_id = ?
-        AND EXISTS (SELECT 1 FROM users WHERE user_id = ? AND forgotten_message_id < ?)
-    `).bind(userId, userId, messageId)),
-    db.prepare(`
-      UPDATE users SET username = NULL, first_name = '', last_name = '', topic_id = NULL,
-        topic_card_message_id = NULL, topic_lease_until = 0, topic_lease_token = NULL,
-        last_rate_key = NULL, blocked_notice_at = 0, updated_at = ?,
-        captcha_verified = 0, captcha_code = NULL, captcha_until = 0, captcha_attempts = 0,
-        captcha_last_at = 0, captcha_message_id = 0, captcha_pending_group = NULL,
-        language = NULL, language_message_id = MAX(language_message_id, ?),
-        generation = generation + 1, erased = 1, forgotten_message_id = ?, forgotten_at = ?
-      WHERE user_id = ? AND forgotten_message_id < ?
-    `).bind(now, messageId, messageId, now, userId, messageId)
-  ]);
 }
 
 export async function relayUserMessageToAdmin(message, user, env, now) {
