@@ -2,7 +2,7 @@
 
 [中文](#zh) · [日本語](#ja) · [English](#en)
 
-Version: v1.4.0 · License: [GPL-3.0-only](LICENSE)
+Version: v1.5.0 · License: [GPL-3.0-only](LICENSE)
 
 <a id="zh"></a>
 
@@ -82,6 +82,7 @@ Cloudflare API Token 需要該帳戶的 Workers Scripts Edit 和 D1 Edit 權限�
 | `RATE_LIMIT_MESSAGE` | Text，可選 | 覆蓋傳送過快提示 |
 | `UNSUPPORTED_MESSAGE` | Text，可選 | 覆蓋訊息無法轉送提示 |
 | `MESSAGE_INTERVAL_SECONDS` | Text，可選 | 一般訊息間隔，預設 2 秒，範圍 0–60 |
+| `TIME_ZONE` | Text，可選 | 自動封鎖通知與 `/blocked` 的時區，IANA 名稱如 `Asia/Taipei`，預設 `UTC` |
 
 未設定的提示訊息使用對應語言的預設翻譯；自訂文字只覆蓋部署語言，最多 4096 字元，其他語言仍使用內建翻譯。[清理排程](https://developers.cloudflare.com/workers/configuration/cron-triggers/)在 `triggers.crons` 調整，採 UTC；範例 `17 3 * * *` 是每日 03:17 UTC，不是使用者本機時間。關閉排程也會停用定期清理。
 
@@ -98,7 +99,7 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 ./tools/Register-TelegramWebhook.ps1 -WorkerUrl 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev'
 ```
 
-最後一個腳本會隱藏輸入 Bot Token，並只訂閱 `message` 和 `edited_message`。已有 Secret 時，`New-WebhookSecret.ps1` 會拒絕覆寫；若要輪替，須同步更新 Cloudflare Secret 和 Telegram Webhook。
+最後一個腳本會隱藏輸入 Bot Token，並訂閱 `message`、`edited_message` 和語言按鈕所需的 `callback_query`。已有 Secret 時，`New-WebhookSecret.ps1` 會拒絕覆寫；若要輪替，須同步更新 Cloudflare Secret 和 Telegram Webhook。
 
 不知道群組 ID 時，先省略 `ADMIN_GROUP_ID` 以管理者私訊模式完成部署及 Webhook 註冊，再由管理者在啟用話題的目標群組傳送 `/setup`，把回覆的 ID 填入 `ADMIN_GROUP_ID` 並儲存部署。Webhook 尚未註冊時，也可在群組傳 `/setup` 後執行 `./tools/Get-TelegramChatIds.ps1`。已有 Webhook 時不要用 `getUpdates` 查 ID。
 
@@ -111,11 +112,14 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 | 使用者私訊 Bot | `/start`、`/help`、`/id` | 歡迎訊息、使用說明、自己的 User ID |
 | 管理者私訊 Bot | `/start`、`/help`、`/status` | 設定選單、查指令、查近 24 小時處理狀態與 Webhook 待處理數 |
 | 管理者私訊 Bot | `/unblock USER_ID` | 依 ID 解封，包括已清除資料的封鎖者 |
-| 管理者私訊 Bot | `/keywords`、`/keywords add 詞1,詞2`、`/keywords del 詞1,詞2` | 查看、加入或移除關鍵字黑名單 |
+| 管理者私訊 Bot | `/keywords`、`/keywords add 詞1,詞2`、`/keywords del 詞1,詞2`、`/keywords clear` | 查看、加入、移除或清空關鍵字黑名單 |
+| 管理者私訊 Bot | `/blocked`、`/blocknotice`、`/blocknotice on`、`/blocknotice off` | 查看封鎖清單；查看或開關自動封鎖通知 |
 | 管理群組的使用者話題 | `/user`、`/block`、`/unblock`、`/close`、`/help`、`/status` | 查資料、封鎖／解封、關閉話題、查指令／狀態 |
 | 管理者私訊模式，管理者回覆轉來的訊息 | `/user`、`/block`、`/unblock` | 操作該訊息所屬的使用者 |
 
 管理權限只認 `ADMIN_USER_ID`。管理者私訊 `/start` 更新預設使用者選單及本人可見的管理選單，並為一般 HTTPS Webhook 補訂閱 `callback_query`；自訂憑證的 Webhook 須自行更新訂閱。選單不會在每則訊息重設。
+
+話題模式的群組無法使用時（Bot 被移出、被禁言或失去權限、群組關閉話題功能或已不存在），使用者訊息與相簿會改轉到管理者私訊，附上使用者資料；對方不會收到錯誤提示。管理者在私訊回覆或編輯這些轉來的訊息即可送回，並私訊收到「群組無法使用」與原因，每小時最多一則。自動封鎖通知發不到 General 時也改發私訊。群組修復後，新訊息自動回到話題，無須切換設定。單一話題被關閉或刪除仍照原方式重開或重建；Telegram 暫時錯誤交給重試，不改走私訊。
 
 一般用戶的指令選單只顯示 `/start`，歡迎訊息下的按鈕可選中文、English、日本語；偏好會保存。每次 `/start` 也更新本人選單，移除舊項目；`/help` 與 `/id` 仍可直接輸入。未選語言時沿用部署預設，不依 Telegram 語言自動切換。正常聊天重用既有使用者查詢，不多讀寫 D1；只在選語言時保存偏好。升級前套用 `0007_user_language.sql`。開啟歡迎訊息時會自動確認按鈕訂閱，每個暖 Worker 只檢查一次；管理者 `/start` 更新預設選單及管理選單。
 
@@ -125,13 +129,15 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 
 ### 關鍵字黑名單
 
-一般使用者直接傳訊即可，沒有驗證或答題。使用者的文字或媒體說明含黑名單中任一關鍵字時，Bot 不轉送、不回覆，並自動封鎖該使用者。比對不分大小寫與全半形，忽略不可見字元；英文與數字須整個單字相符（`ad` 不會命中 `address`），中日文沒有詞的邊界，出現即算，太短的中文詞可能誤擋。封鎖後 1 小時內不回應，之後沿用一般封鎖提示；誤判時用 `/unblock USER_ID` 解除。使用者把已轉送的訊息編輯成含關鍵字時，同樣不同步並封鎖。相簿逐則判斷，觸發封鎖後其餘項目不再轉送，已送出的不撤回。
+一般使用者直接傳訊即可，沒有驗證或答題。使用者的文字、媒體說明、隱藏在文字下的連結、訊息按鈕、顯示名稱或轉貼來源含黑名單中任一關鍵字時，Bot 不轉送、不回覆，並自動封鎖該使用者。比對不分大小寫與全半形，忽略不可見字元；英文與數字須整個單字相符（`ad` 不會命中 `address`），中日文沒有詞的邊界，出現即算，太短的中文詞可能誤擋。封鎖後 1 小時內不回應，之後沿用一般封鎖提示；誤判時用 `/unblock USER_ID` 解除。使用者把已轉送的訊息編輯成含關鍵字時，同樣不同步並封鎖。相簿逐則判斷，觸發封鎖後其餘項目不再轉送，已送出的不撤回。
 
-管理者私訊 Bot 傳 `/keywords` 查看名單，`/keywords add 詞1,詞2` 一次加入多個（英文逗號分隔，也接受全形逗號），`/keywords del 詞1,詞2` 移除。最多 100 個、每個 30 字以內，重複的自動略過。名單保存在 D1，修改無須重新部署。
+管理者私訊 Bot 傳 `/keywords` 查看名單，`/keywords add 詞1,詞2` 一次加入多個（英文逗號分隔，也接受全形逗號），`/keywords del 詞1,詞2` 移除，`/keywords clear` 清空。最多 100 個、每個 30 字以內，重複的自動略過。名單保存在 D1，修改無須重新部署。
 
-用量：名單在每個暖 Worker 的記憶體快取 1 分鐘，正常訊息最多每分鐘多讀一筆設定；貼圖等沒有文字的訊息不讀。處理修改指令的 Worker 立即生效，其他 Worker 最遲 1 分鐘。命中時只寫入一筆封鎖，不建立話題或對照。沒有新增依賴、服務或排程；每個 Webhook 的既有去重寫入仍會消耗額度，這不是抗流量攻擊服務。
+每次自動封鎖會發一則通知，列出觸發的關鍵字、時間、名稱、使用者名稱、User ID 及解除指令；話題模式發到管理群組的 General，私訊模式發給管理者。同一人只在被封鎖的那一次通知，不轉送原訊息內容。管理者私訊 `/blocknotice off` 關閉、`/blocknotice on` 開啟，設定保存在 D1；關閉通知不影響自動封鎖。通知發送失敗只記錄日誌，不影響封鎖。`/blocked` 依時間列出最近 30 位封鎖中的使用者。時間依 `TIME_ZONE` 顯示，未設定則為 UTC。
 
-升級前套用 `0008_keyword_blocklist.sql`。原有的算術驗證與 `/captcha` 已移除，舊的 `CAPTCHA_ENABLED` 變數會被忽略；舊資料欄位保留不刪。升級時仍在答題的使用者之後直接轉送，暫存的第一則訊息不再補送。
+用量：名單在每個暖 Worker 的記憶體快取 1 分鐘，正常訊息最多每分鐘多讀一筆設定；比對新增的欄位只在記憶體內進行，不增加 D1 用量。處理修改指令的 Worker 立即生效，其他 Worker 最遲 1 分鐘。命中時只寫入一筆封鎖並發一則通知，不建立話題或對照。沒有新增依賴、服務或排程；每個 Webhook 的既有去重寫入仍會消耗額度，這不是抗流量攻擊服務。
+
+升級前套用 `0008_keyword_blocklist.sql`、`0009_block_notice.sql` 與 `0010_group_fallback.sql`。原有的算術驗證與 `/captcha` 已移除，舊的 `CAPTCHA_ENABLED` 變數會被忽略；舊資料欄位保留不刪。升級時仍在答題的使用者之後直接轉送，暫存的第一則訊息不再補送。
 
 ### 資料與限制
 
@@ -244,6 +250,7 @@ Cloudflare Worker の Variables and Secrets に次を設定します。
 | `RATE_LIMIT_MESSAGE` | Text、省略可 | 送信頻度の案内を上書き |
 | `UNSUPPORTED_MESSAGE` | Text、省略可 | 転送できないメッセージの案内を上書き |
 | `MESSAGE_INTERVAL_SECONDS` | Text、省略可 | 通常メッセージの間隔。既定は 2 秒、範囲は 0–60 |
+| `TIME_ZONE` | Text、省略可 | 自動ブロック通知と `/blocked` のタイムゾーン。`Asia/Tokyo` などの IANA 名、既定は `UTC` |
 
 未設定の案内は対応する言語の既定の翻訳を使います。カスタム文はデプロイ言語だけに適用し、最大 4096 文字です。他言語には組み込みの翻訳を使います。[クリーンアップのスケジュール](https://developers.cloudflare.com/workers/configuration/cron-triggers/)は `triggers.crons` で変更し、時刻は UTC です。例の `17 3 * * *` は毎日 03:17 UTC で、ユーザーの現地時刻ではありません。スケジュールを無効にすると定期クリーンアップも停止します。
 
@@ -273,11 +280,14 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 | Bot との個別チャット（ユーザー） | `/start`、`/help`、`/id` | 開始時のメッセージ、使い方、自分の User ID |
 | Bot との個別チャット（管理者） | `/start`、`/help`、`/status` | メニュー設定、コマンド案内、過去24時間の処理状況と Webhook 保留件数 |
 | Bot との個別チャット（管理者） | `/unblock USER_ID` | ID による解除。消去済みのブロックユーザーも対象 |
-| Bot との個別チャット（管理者） | `/keywords`、`/keywords add 語1,語2`、`/keywords del 語1,語2` | キーワードのブロックリストの表示、追加、削除 |
+| Bot との個別チャット（管理者） | `/keywords`、`/keywords add 語1,語2`、`/keywords del 語1,語2`、`/keywords clear` | キーワードのブロックリストの表示、追加、削除、全削除 |
+| Bot との個別チャット（管理者） | `/blocked`、`/blocknotice`、`/blocknotice on`、`/blocknotice off` | ブロック一覧の表示、自動ブロック通知の表示と切り替え |
 | 管理グループのユーザートピック | `/user`、`/block`、`/unblock`、`/close`、`/help`、`/status` | 情報表示、ブロック／解除、トピックを閉じる、案内／状況確認 |
 | 管理者個別チャットモードで転送メッセージへの管理者の返信 | `/user`、`/block`、`/unblock` | そのメッセージのユーザーを操作 |
 
 管理権限は `ADMIN_USER_ID` だけで判定します。管理者が `/start` を個別チャットすると、既定のユーザー用メニューと本人専用の管理メニューを更新し、通常の HTTPS Webhook に `callback_query` を追加します。独自の証明書を使う Webhook は手動で更新してください。メニューはメッセージごとに設定し直しません。
+
+トピックモードのグループが使えない場合（Bot の削除・発言制限・権限の取り消し、トピック機能の無効化、グループの消失）、ユーザーのメッセージとアルバムはユーザー情報付きで管理者の個別チャットに転送し、相手にはエラーを表示しません。管理者は転送されたメッセージに個別チャットで返信・編集すれば相手に届きます。「グループが使えない」旨と原因は1時間に最大1回通知します。自動ブロック通知が General に送れない場合も個別チャットに送ります。グループが復旧すると、新しいメッセージは設定変更なしでトピックに戻ります。個別トピックの終了や削除は従来どおり再開・再作成し、Telegram の一時的なエラーは個別チャットに切り替えず再試行します。
 
 ユーザーのコマンドメニューは `/start` のみです。案内のボタンで中文・English・日本語を選び、設定を保存できます。`/start` は本人の古いメニューも更新します。`/help` と `/id` は直接入力できます。未選択時はデプロイの既定値を使い、Telegram の言語では自動切り替えしません。通常の会話は既存のユーザー照会を使い、D1 の追加読み書きはありません。更新前に `0007_user_language.sql` を適用してください。案内表示時にボタンの受信設定を自動確認し、稼働中の Worker ごとに一度だけ照会します。管理者の `/start` は既定メニューと管理メニューを更新します。
 
@@ -287,13 +297,15 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 
 ### キーワードのブロックリスト
 
-ユーザーは確認や問題なしでそのまま送信できます。テキストやメディアのキャプションにブロックリストのいずれかのキーワードが含まれると、Bot は転送も返信もせず、そのユーザーを自動でブロックします。大文字小文字・全角半角を区別せず、不可視文字は無視します。英字と数字は単語全体の一致が必要で（`ad` は `address` に一致しません）、中国語・日本語は単語の境界がないため含まれていれば一致し、短すぎる語は誤検知の原因になります。ブロック後1時間は応答せず、その後は通常のブロック通知を使います。誤検知は `/unblock USER_ID` で解除してください。転送済みメッセージをキーワード入りに編集した場合も同期せずブロックします。アルバムは1件ずつ判定し、ブロック後の残りは転送しません。送信済みの分は取り消しません。
+ユーザーは確認や問題なしでそのまま送信できます。テキスト、メディアのキャプション、文字に埋め込まれたリンク、メッセージのボタン、表示名、転送元のいずれかにブロックリストのキーワードが含まれると、Bot は転送も返信もせず、そのユーザーを自動でブロックします。大文字小文字・全角半角を区別せず、不可視文字は無視します。英字と数字は単語全体の一致が必要で（`ad` は `address` に一致しません）、中国語・日本語は単語の境界がないため含まれていれば一致し、短すぎる語は誤検知の原因になります。ブロック後1時間は応答せず、その後は通常のブロック通知を使います。誤検知は `/unblock USER_ID` で解除してください。転送済みメッセージをキーワード入りに編集した場合も同期せずブロックします。アルバムは1件ずつ判定し、ブロック後の残りは転送しません。送信済みの分は取り消しません。
 
-管理者は Bot との個別チャットで `/keywords` を送ると一覧を確認でき、`/keywords add 語1,語2` で複数を一度に追加（半角カンマ区切り、全角カンマも可）、`/keywords del 語1,語2` で削除します。最大100件、各30文字までで、重複は自動で除外します。一覧は D1 に保存され、変更に再デプロイは不要です。
+管理者は Bot との個別チャットで `/keywords` を送ると一覧を確認でき、`/keywords add 語1,語2` で複数を一度に追加（半角カンマ区切り、全角カンマも可）、`/keywords del 語1,語2` で削除、`/keywords clear` ですべて削除します。最大100件、各30文字までで、重複は自動で除外します。一覧は D1 に保存され、変更に再デプロイは不要です。
 
-使用量：一覧は稼働中の Worker ごとに1分間メモリにキャッシュするため、通常メッセージで追加される読み取りは1分に最大1件です。ステッカーなどテキストのないメッセージでは読みません。変更コマンドを処理した Worker では即時、他の Worker でも1分以内に反映されます。一致時はブロックを1件書き込むだけで、トピックや対応記録は作りません。依存関係・サービス・定期処理の追加はありませんが、Webhook の既存の重複防止処理は引き続き枠を消費します。大量アクセスを防ぐ仕組みではありません。
+自動ブロックのたびに、一致したキーワード、日時、名前、ユーザー名、User ID、解除コマンドを通知します。トピックモードでは管理グループの General、個別チャットモードでは管理者に送ります。通知はブロックした1回だけで、元のメッセージ内容は転送しません。管理者は個別チャットで `/blocknotice off` で無効、`/blocknotice on` で有効にでき、設定は D1 に保存されます。通知を無効にしても自動ブロックは続きます。通知の送信失敗はログに記録するだけで、ブロックには影響しません。`/blocked` はブロック中のユーザーを新しい順に最大30件表示します。日時は `TIME_ZONE` に従い、未設定なら UTC です。
 
-更新前に `0008_keyword_blocklist.sql` を適用してください。従来の計算確認と `/captcha` は削除し、古い `CAPTCHA_ENABLED` 変数は無視されます。古いデータ列は残します。更新時に回答待ちだったユーザーはその後そのまま転送され、一時保存された最初のメッセージは自動転送されません。
+使用量：一覧は稼働中の Worker ごとに1分間メモリにキャッシュするため、通常メッセージで追加される読み取りは1分に最大1件です。追加した照合項目はメモリ内で処理し、D1 の使用量は増えません。変更コマンドを処理した Worker では即時、他の Worker でも1分以内に反映されます。一致時はブロックを1件書き込み通知を1件送るだけで、トピックや対応記録は作りません。依存関係・サービス・定期処理の追加はありませんが、Webhook の既存の重複防止処理は引き続き枠を消費します。大量アクセスを防ぐ仕組みではありません。
+
+更新前に `0008_keyword_blocklist.sql`、`0009_block_notice.sql`、`0010_group_fallback.sql` を適用してください。従来の計算確認と `/captcha` は削除し、古い `CAPTCHA_ENABLED` 変数は無視されます。古いデータ列は残します。更新時に回答待ちだったユーザーはその後そのまま転送され、一時保存された最初のメッセージは自動転送されません。
 
 ### データと制限
 
@@ -406,6 +418,7 @@ Set these under the Worker's Variables and Secrets in Cloudflare:
 | `RATE_LIMIT_MESSAGE` | Text, optional | Overrides the rate-limit notice |
 | `UNSUPPORTED_MESSAGE` | Text, optional | Overrides the unsupported-message notice |
 | `MESSAGE_INTERVAL_SECONDS` | Text, optional | Minimum interval for ordinary messages; default 2 seconds, range 0–60 |
+| `TIME_ZONE` | Text, optional | Time zone for auto-block notices and `/blocked`, as an IANA name such as `Europe/London`; default `UTC` |
 
 Unset notices use the matching language's defaults. Custom text applies only to the deployment language and is limited to 4096 characters; other languages use built-in translations. Change the [cleanup schedule](https://developers.cloudflare.com/workers/configuration/cron-triggers/) under `triggers.crons`, using UTC: the example `17 3 * * *` means daily at 03:17 UTC, not the user's local time. Disabling the schedule also disables periodic cleanup.
 
@@ -435,11 +448,14 @@ Users message the bot privately. The admin replies in the matching topic or, in 
 | User's private chat with the bot | `/start`, `/help`, `/id` | Welcome message, instructions, own User ID |
 | Admin's private chat with the bot | `/start`, `/help`, `/status` | Set command menu, show help, see 24-hour processing and webhook pending count |
 | Admin's private chat with the bot | `/unblock USER_ID` | Unblock by ID, including blocked users who erased their data |
-| Admin's private chat with the bot | `/keywords`, `/keywords add word1,word2`, `/keywords del word1,word2` | Show, add to, or remove from the keyword blocklist |
+| Admin's private chat with the bot | `/keywords`, `/keywords add word1,word2`, `/keywords del word1,word2`, `/keywords clear` | Show, add to, remove from, or clear the keyword blocklist |
+| Admin's private chat with the bot | `/blocked`, `/blocknotice`, `/blocknotice on`, `/blocknotice off` | Show blocked users; show or toggle auto-block notices |
 | User topic in the admin group | `/user`, `/block`, `/unblock`, `/close`, `/help`, `/status` | User details, block/unblock, close topic, help/status |
 | Admin private-chat mode: reply to a relayed message | `/user`, `/block`, `/unblock` | Act on the user belonging to that message |
 
 Only `ADMIN_USER_ID` grants admin access. The admin sends `/start` privately to refresh the default user menu and their private admin menus, and subscribe standard HTTPS webhooks to `callback_query`. Webhooks with a custom certificate need a manual subscription update. Menus are not reset on every message.
+
+If the topic-mode group becomes unusable (the bot is removed, muted, or loses its rights, topics are disabled, or the group no longer exists), user messages and albums are relayed to the admin's private chat with the user's details, and the sender sees no error. The admin replies to or edits those relayed messages privately to answer, and receives a "group unavailable" alert with the reason at most once an hour. Auto-block notices that cannot reach General also go to the private chat. Once the group works again, new messages return to topics with no setting change. A single closed or deleted topic is still reopened or recreated as before, and temporary Telegram errors are retried instead of switching to the private chat.
 
 The user command menu contains only `/start`. Buttons below the welcome message select 中文, English, or 日本語 and save the choice. Each `/start` also replaces that user's old menu. `/help` and `/id` remain available by typing them. Users without a choice use the deployment default, regardless of Telegram language. Normal chat reuses existing user queries with no extra D1 reads or writes. Apply `0007_user_language.sql` before upgrading. Opening the welcome message checks button subscriptions once per warm Worker; the admin's `/start` refreshes default and admin menus.
 
@@ -449,13 +465,15 @@ The user command menu contains only `/start`. Buttons below the welcome message 
 
 ### Keyword blocklist
 
-Users simply send messages, with no check or question. If a user's text or media caption contains any keyword on the blocklist, the bot does not relay or reply and blocks the sender automatically. Matching ignores case, full/half width, and invisible characters. Latin words and numbers must match whole (`ad` does not match `address`); Chinese and Japanese have no word boundaries and match anywhere, so very short CJK keywords can cause false positives. Blocked users get no response for the first hour, then the usual blocked notice. Undo a false positive with `/unblock USER_ID`. Editing a relayed message to include a keyword also blocks the sender without syncing the edit. Albums are checked item by item; after a block, remaining items are not relayed, and items already sent are not withdrawn.
+Users simply send messages, with no check or question. If a user's text, media caption, hidden link, message button, display name, or forward source contains any keyword on the blocklist, the bot does not relay or reply and blocks the sender automatically. Matching ignores case, full/half width, and invisible characters. Latin words and numbers must match whole (`ad` does not match `address`); Chinese and Japanese have no word boundaries and match anywhere, so very short CJK keywords can cause false positives. Blocked users get no response for the first hour, then the usual blocked notice. Undo a false positive with `/unblock USER_ID`. Editing a relayed message to include a keyword also blocks the sender without syncing the edit. Albums are checked item by item; after a block, remaining items are not relayed, and items already sent are not withdrawn.
 
-The admin sends `/keywords` privately to view the list, `/keywords add word1,word2` to add several at once (comma-separated; full-width commas also work), and `/keywords del word1,word2` to remove them. Up to 100 keywords of 30 characters each; duplicates are skipped. The list is stored in D1 and changes need no redeploy.
+The admin sends `/keywords` privately to view the list, `/keywords add word1,word2` to add several at once (comma-separated; full-width commas also work), `/keywords del word1,word2` to remove them, and `/keywords clear` to remove all. Up to 100 keywords of 30 characters each; duplicates are skipped. The list is stored in D1 and changes need no redeploy.
 
-Usage: each warm Worker caches the list in memory for one minute, so normal messages add at most one settings read per minute; messages without text, such as stickers, skip it. The Worker handling a change applies it immediately, others within a minute. A match writes only one block record and creates no topic or mapping. No dependencies, services, or schedules are added. Existing webhook deduplication still consumes quota on each update; this is not flood protection.
+Each automatic block sends one notice with the matched keyword, time, name, username, User ID, and the unblock command: to the admin group's General topic in topic mode, or to the admin in private-chat mode. A sender is reported only when blocked, and the original message is not relayed. The admin turns notices off with `/blocknotice off` and on with `/blocknotice on`; the setting is stored in D1, and turning notices off does not stop automatic blocking. A failed notice is only logged and does not affect the block. `/blocked` lists up to 30 currently blocked users, newest first. Times use `TIME_ZONE`, or UTC when unset.
 
-Apply `0008_keyword_blocklist.sql` before upgrading. The arithmetic check and `/captcha` were removed, and an old `CAPTCHA_ENABLED` variable is ignored. Old data columns are kept. Users still answering a question when you upgrade are relayed directly afterwards; their staged first message is not replayed.
+Usage: each warm Worker caches the list in memory for one minute, so normal messages add at most one settings read per minute; the extra checked fields are compared in memory and add no D1 usage. The Worker handling a change applies it immediately, others within a minute. A match writes one block record and sends one notice, creating no topic or mapping. No dependencies, services, or schedules are added. Existing webhook deduplication still consumes quota on each update; this is not flood protection.
+
+Apply `0008_keyword_blocklist.sql`, `0009_block_notice.sql`, and `0010_group_fallback.sql` before upgrading. The arithmetic check and `/captcha` were removed, and an old `CAPTCHA_ENABLED` variable is ignored. Old data columns are kept. Users still answering a question when you upgrade are relayed directly afterwards; their staged first message is not replayed.
 
 ### Data and limits
 

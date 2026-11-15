@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import worker, { matchesKeyword, normalizeKeyword, processUpdate } from "../src/index.js";
+import worker, { configurationIssue, formatDateTime, matchesKeyword, normalizeKeyword, processUpdate } from "../src/index.js";
 import { t } from "../src/i18n.js";
 
 class BoundStatement {
@@ -718,6 +718,10 @@ test("ready 拒絕缺少新 migration 的 D1，套用後恢復", async () => {
     db.database.exec(readFileSync(new URL("../migrations/0007_user_language.sql", import.meta.url), "utf8"));
     assert.equal((await worker.fetch(request(), auditEnv(db))).status, 503);
     db.database.exec(readFileSync(new URL("../migrations/0008_keyword_blocklist.sql", import.meta.url), "utf8"));
+    assert.equal((await worker.fetch(request(), auditEnv(db))).status, 503);
+    db.database.exec(readFileSync(new URL("../migrations/0009_block_notice.sql", import.meta.url), "utf8"));
+    assert.equal((await worker.fetch(request(), auditEnv(db))).status, 503);
+    db.database.exec(readFileSync(new URL("../migrations/0010_group_fallback.sql", import.meta.url), "utf8"));
     assert.equal((await worker.fetch(request(), auditEnv(db))).status, 200);
   } finally { db.close(); }
 });
@@ -735,7 +739,7 @@ test("管理者 /start 更新使用者選單，管理指令仍只對本人可見
   const menus = calls.filter((call) => call.method === "setMyCommands");
   assert.equal(menus.length, 3);
   assert.deepEqual(menus[0].payload.scope, { type: "chat", chat_id: "1" });
-  assert.deepEqual(menus[0].payload.commands.map((item) => item.command), ["start", "help", "status", "keywords", "unblock"]);
+  assert.deepEqual(menus[0].payload.commands.map((item) => item.command), ["start", "help", "status", "keywords", "blocked", "blocknotice", "unblock"]);
   assert.deepEqual(menus[1].payload.scope, { type: "chat_member", chat_id: "-1001", user_id: 1 });
   assert.deepEqual(menus[1].payload.commands.map((item) => item.command),
     ["help", "status", "user", "block", "unblock", "close"]);
@@ -747,7 +751,7 @@ test("管理者 /start 更新使用者選單，管理指令仍只對本人可見
     from: { id: 1, is_bot: false }, text: "/start"
   } }, { BOT_TOKEN: "test-token", ADMIN_USER_ID: "1", BOT_DB: db });
   assert.deepEqual(calls.find((call) => call.method === "setMyCommands").payload.commands
-    .map((item) => item.command), ["start", "help", "status", "keywords", "user", "block", "unblock"]);
+    .map((item) => item.command), ["start", "help", "status", "keywords", "blocked", "blocknotice", "user", "block", "unblock"]);
 }));
 
 test("管理者 /status 顯示近 24 小時更新與 Webhook 待處理數", () => withDatabaseMock(async (db) => {
@@ -1637,11 +1641,14 @@ test("命中關鍵字不轉送、不回覆並自動封鎖；未命中照常轉�
     [32, { photo: [{}], caption: "掃碼加​群" }]]) {
     await processUpdate({ message: userMessage(id, extra) }, env);
   }
-  assert.deepEqual(calls, []);
+  assert.deepEqual(calls.map((call) => [call.method, call.payload.chat_id, call.payload.message_thread_id]),
+    [["sendMessage", "-1001", undefined]]);
+  assert.ok(calls[0].payload.text.includes("<code>vip福利</code>"));
+  calls.length = 0;
   const user = await db.prepare("SELECT * FROM users WHERE user_id = '2'").first();
   assert.equal(user.blocked, 1);
   assert.equal(user.topic_id, null);
-  assert.equal(user.first_name, "");
+  assert.equal(user.first_name, "測試者");
   assert.equal((await db.prepare("SELECT COUNT(*) n FROM message_map WHERE user_id = '2'").first()).n, 0);
   Date.now = () => (user.blocked_notice_at + 3601) * 1000;
   await processUpdate({ message: userMessage(33, { text: "一小時後" }) }, env);
@@ -1651,20 +1658,16 @@ test("命中關鍵字不轉送、不回覆並自動封鎖；未命中照常轉�
   assert.equal(calls.at(-1).method, "copyMessage");
 }));
 
-test("已轉送訊息編輯成關鍵字時不同步並封鎖；無文字訊息不讀設定", () => withDatabaseMock(async (db) => {
+test("已轉送訊息編輯成關鍵字時不同步並封鎖，通知只發一次", () => withDatabaseMock(async (db) => {
   seedAuditUser(db);
   const env = { ...auditEnv(db), MESSAGE_INTERVAL_SECONDS: "0" }, calls = [];
   globalThis.fetch = recordCalls(calls);
-  const queries = [], prepare = db.prepare.bind(db);
-  db.prepare = (sql) => { queries.push(sql); return prepare(sql); };
-  await processUpdate({ message: userMessage(9, { sticker: {} }) }, env);
-  assert.equal(calls.at(-1).method, "copyMessage");
-  assert.equal(queries.some((sql) => sql.includes("bot_settings")), false);
   await processUpdate({ message: adminMessage(10, "/keywords add 加群") }, env);
   await processUpdate({ message: userMessage(20, { text: "正常內容" }) }, env);
   calls.length = 0;
   await processUpdate({ edited_message: userMessage(20, { text: "改成加群連結" }) }, env);
-  assert.deepEqual(calls, []);
+  await processUpdate({ edited_message: userMessage(20, { text: "再改一次加群" }) }, env);
+  assert.deepEqual(calls.map((call) => [call.method, call.payload.chat_id]), [["sendMessage", "-1001"]]);
   assert.equal((await db.prepare("SELECT blocked FROM users WHERE user_id = '2'").first()).blocked, 1);
 }));
 
@@ -1766,3 +1769,193 @@ test("英文與數字整詞相符才命中，中日文出現即命中，大小�
   assert.equal(hit("a​d here", "ad"), true);
   assert.equal(hit("see ad.", "ad"), true);
 });
+
+test("自動封鎖通知含關鍵字、時間、名稱、使用者名稱與 ID；私訊模式發給管理者，併發只通知一次", () => withDatabaseMock(async (db) => {
+  const env = { ...auditEnv(db, false), TIME_ZONE: "Asia/Tokyo" }, calls = [];
+  globalThis.fetch = recordCalls(calls);
+  Date.now = () => Date.UTC(2026, 10, 15, 10, 2, 3);
+  await processUpdate({ message: adminMessage(10, "/keywords add 加群") }, env);
+  calls.length = 0;
+  const spam = (id) => userMessage(id, { text: "快來加群", from: { id: 2, is_bot: false,
+    first_name: "<廣告>", last_name: "帳號", username: "spam_user" } });
+  await Promise.all([20, 21, 22].map((id) => processUpdate({ message: spam(id) }, env)));
+  assert.equal(calls.length, 1);
+  const notice = calls[0].payload;
+  assert.equal(notice.chat_id, "1");
+  assert.equal(notice.parse_mode, "HTML");
+  assert.equal(notice.text, [
+    `<b>${t("zh", "autoBlocked")}</b>`,
+    `${t("zh", "matchedKeyword")}：<code>加群</code>`,
+    `${t("zh", "blockedAt")}：2026-11-15 19:02:03 (Asia/Tokyo)`,
+    `${t("zh", "name")}：&lt;廣告&gt; 帳號`,
+    `${t("zh", "username")}：@spam_user`,
+    "User ID：<code>2</code>",
+    `${t("zh", "unblockHint")}：<code>/unblock 2</code>`
+  ].join("\n"));
+  assert.equal(formatDateTime(0, {}), "1970-01-01 00:00:00 (UTC)");
+}));
+
+test("通知可用 /blocknotice 關閉並保留；關閉後仍封鎖；通知失敗不影響封鎖或重試", () => withDatabaseMock(async (db) => {
+  const env = auditEnv(db), calls = [];
+  globalThis.fetch = recordCalls(calls);
+  await processUpdate({ message: adminMessage(10, "/blocknotice") }, env);
+  assert.ok(calls.at(-1).payload.text.startsWith(t("zh", "blockNoticeOn") + "\n\n" + t("zh", "blockNoticeTopic")));
+  await processUpdate({ message: adminMessage(11, "/blocknotice off") }, env);
+  assert.ok(calls.at(-1).payload.text.startsWith(t("zh", "blockNoticeOff")));
+  await processUpdate({ message: adminMessage(12, "/keywords add 加群") }, env);
+  calls.length = 0;
+  await processUpdate({ message: userMessage(20, { text: "加群" }) }, env);
+  assert.deepEqual(calls, []);
+  assert.equal((await db.prepare("SELECT blocked FROM users WHERE user_id = '2'").first()).blocked, 1);
+  await processUpdate({ message: adminMessage(9, "/blocknotice on") }, env);
+  assert.equal((await db.prepare("SELECT block_notice FROM bot_settings").first()).block_notice, 0);
+  await processUpdate({ message: adminMessage(13, "/blocknotice on") }, env);
+  globalThis.fetch = async () => telegramResponse(false, 403, "Forbidden: bot is not a member");
+  const response = await worker.fetch(auditRequest(9300, userMessage(30, {
+    chat: { id: 3, type: "private" }, from: { id: 3, is_bot: false }, text: "加群" })), env);
+  assert.equal(response.status, 200);
+  assert.equal((await db.prepare("SELECT blocked FROM users WHERE user_id = '3'").first()).blocked, 1);
+}));
+
+test("隱藏連結、按鈕、顯示名稱與轉貼來源含關鍵字也會封鎖", async () => {
+  const cases = [
+    { text: "點此", entities: [{ type: "text_link", offset: 0, length: 2, url: "https://spam.example/vip" }] },
+    { text: "看看", reply_markup: { inline_keyboard: [[{ text: "領取", url: "https://spam.example/vip" }]] } },
+    { sticker: {}, from: { id: 2, is_bot: false, first_name: "VIP 客服" } },
+    { text: "轉貼", forward_origin: { type: "channel", chat: { id: -100, type: "channel", title: "VIP 頻道" } } },
+    { photo: [{}], caption: "hi", caption_entities: [{ type: "text_link", offset: 0, length: 2, url: "t.me/VIP" }] }
+  ];
+  for (const extra of cases) await withDatabaseMock(async (db) => {
+    const env = auditEnv(db), calls = [];
+    globalThis.fetch = recordCalls(calls);
+    await processUpdate({ message: adminMessage(10, "/keywords add vip") }, env);
+    await processUpdate({ message: userMessage(20, extra) }, env);
+    assert.equal((await db.prepare("SELECT blocked FROM users WHERE user_id = '2'").first())?.blocked, 1, JSON.stringify(extra));
+    assert.equal(calls.some((call) => call.method.startsWith("copy")), false);
+  });
+});
+
+test("/keywords clear 清空名單；/blocked 依時間列出封鎖者並可解除", () => withDatabaseMock(async (db) => {
+  const env = { ...auditEnv(db), TIME_ZONE: "UTC" }, calls = [];
+  globalThis.fetch = recordCalls(calls);
+  await processUpdate({ message: adminMessage(10, "/blocked") }, env);
+  assert.equal(calls.at(-1).payload.text, t("zh", "blockedListEmpty"));
+  await processUpdate({ message: adminMessage(11, "/keywords add 甲,乙") }, env);
+  await processUpdate({ message: adminMessage(12, "/keywords clear") }, env);
+  assert.deepEqual(await storedKeywords(db), []);
+  assert.ok(calls.at(-1).payload.text.startsWith(t("zh", "keywordsEmpty")));
+  db.database.exec(`INSERT INTO users(user_id,username,first_name,blocked,created_at,updated_at) VALUES
+    ('5','old_one','舊<封鎖>',1,1,1700000000),('6',NULL,'',1,1,1800000000),('7','ok','正常',0,1,1900000000)`);
+  await processUpdate({ message: adminMessage(13, "/blocked") }, env);
+  const list = calls.at(-1).payload;
+  assert.equal(list.parse_mode, "HTML");
+  assert.deepEqual(list.text.split("\n"), [
+    `${t("zh", "blockedList")}：2`, "",
+    `<code>6</code> · ${t("zh", "notProvided")} · 2027-01-15 08:00`,
+    "<code>5</code> · 舊&lt;封鎖&gt; · @old_one · 2023-11-14 22:13", "",
+    t("zh", "blockedListHint")
+  ]);
+}));
+
+test("TIME_ZONE 必須是有效時區", () => {
+  const base = { BOT_DB: { prepare() {} }, BOT_TOKEN: "x", WEBHOOK_SECRET: "s", ADMIN_USER_ID: "1" };
+  assert.equal(configurationIssue({ ...base, TIME_ZONE: "Asia/Tokyo" }), null);
+  assert.equal(configurationIssue({ ...base, TIME_ZONE: "" }), null);
+  assert.equal(configurationIssue({ ...base, TIME_ZONE: "Mars/Base" }), "TIME_ZONE");
+});
+
+function groupDownFetch(calls, description = "Forbidden: bot was kicked from the supergroup chat", status = 403) {
+  let messageId = 900;
+  return async (url, init) => {
+    const method = String(url).split("/").pop(), payload = JSON.parse(init.body);
+    calls.push({ method, payload });
+    if (String(payload.chat_id) === "-1001") return telegramResponse(false, status, description);
+    return telegramResponse(method === "copyMessages" ? payload.message_ids.map(() => ({ message_id: ++messageId }))
+      : { message_id: ++messageId });
+  };
+}
+
+test("群組失效時新使用者訊息改轉管理者私訊，不提示使用者錯誤，警報每小時最多一則", () => withDatabaseMock(async (db) => {
+  const env = { ...auditEnv(db), MESSAGE_INTERVAL_SECONDS: "0" }, calls = [];
+  globalThis.fetch = groupDownFetch(calls);
+  let now = 2_000_000_000_000;
+  Date.now = () => now;
+  await processUpdate({ message: userMessage(10, { text: "第一則" }) }, env);
+  const toAdmin = calls.filter((call) => call.payload.chat_id === "1");
+  assert.deepEqual(toAdmin.map((call) => call.method), ["sendMessage", "sendMessage", "copyMessage"]);
+  assert.ok(toAdmin[0].payload.text.startsWith(t("zh", "groupUnavailable")));
+  assert.ok(toAdmin[0].payload.text.endsWith("Forbidden: bot was kicked from the supergroup chat"));
+  assert.ok(toAdmin[1].payload.text.startsWith(`<b>${t("zh", "receivedChat")}</b>`));
+  assert.equal(calls.some((call) => String(call.payload.chat_id) === "2"), false);
+  assert.equal((await db.prepare("SELECT target_chat_id FROM message_map WHERE source_message_id = 10").first()).target_chat_id, "1");
+  calls.length = 0;
+  now += 60_000;
+  await processUpdate({ message: userMessage(11, { text: "第二則" }) }, env);
+  assert.deepEqual(calls.filter((call) => call.payload.chat_id === "1").map((call) => call.method), ["copyMessage"]);
+  calls.length = 0;
+  now += 3_600_000;
+  await processUpdate({ message: userMessage(12, { text: "一小時後" }) }, env);
+  assert.ok(calls.find((call) => call.payload.chat_id === "1").payload.text.startsWith(t("zh", "groupUnavailable")));
+}));
+
+test("已有話題但群組權限被收回時，也改轉私訊而非誤報訊息格式不支援", () => withDatabaseMock(async (db) => {
+  seedAuditUser(db);
+  const env = auditEnv(db), calls = [];
+  globalThis.fetch = groupDownFetch(calls, "Bad Request: not enough rights to send text messages to the chat", 400);
+  await processUpdate({ message: userMessage(10, { text: "你好" }) }, env);
+  assert.equal(calls.at(-1).method, "copyMessage");
+  assert.equal(calls.at(-1).payload.chat_id, "1");
+  assert.equal(calls.some((call) => call.payload.text === t("zh", "unsupportedMessage")), false);
+}));
+
+test("群組失效期間管理者在私訊回覆與編輯會送回使用者；非回覆仍提示到話題", () => withDatabaseMock(async (db) => {
+  const env = auditEnv(db), calls = [];
+  globalThis.fetch = groupDownFetch(calls);
+  await processUpdate({ message: userMessage(10, { text: "求助" }) }, env);
+  const relayed = await db.prepare("SELECT target_message_id FROM message_map WHERE source_message_id = 10").first();
+  calls.length = 0;
+  await processUpdate({ message: adminMessage(50, "收到", { reply_to_message: { message_id: relayed.target_message_id } }) }, env);
+  assert.deepEqual([calls.at(-1).method, calls.at(-1).payload.chat_id], ["copyMessage", "2"]);
+  await processUpdate({ edited_message: adminMessage(50, "收到了", { reply_to_message: { message_id: relayed.target_message_id } }) }, env);
+  assert.deepEqual([calls.at(-1).method, calls.at(-1).payload.chat_id, calls.at(-1).payload.text], ["editMessageText", "2", "收到了"]);
+  await processUpdate({ message: adminMessage(51, "/user", { reply_to_message: { message_id: relayed.target_message_id } }) }, env);
+  assert.ok(calls.at(-1).payload.text.includes("<code>2</code>"));
+  await processUpdate({ message: adminMessage(52, "沒有回覆") }, env);
+  assert.equal(calls.at(-1).payload.text, t("zh", "topicRequired"));
+  await processUpdate({ message: adminMessage(53, "回覆提示", { reply_to_message: { message_id: 1 } }) }, env);
+  assert.equal(calls.at(-1).payload.text, t("zh", "topicRequired"));
+  const before = calls.length;
+  await processUpdate({ edited_message: adminMessage(52, "改沒有回覆的訊息") }, env);
+  assert.equal(calls.length, before);
+}));
+
+test("群組失效時相簿整組改轉私訊並保存每則對照", () => withDatabaseMock(async (db) => {
+  const env = auditEnv(db), calls = [];
+  globalThis.fetch = groupDownFetch(calls, "Bad Request: the chat is not a forum", 400);
+  await Promise.all([20, 21].map((id) =>
+    processUpdate({ message: userMessage(id, { photo: [{}], media_group_id: "fallback-album" }) }, env)));
+  const copy = calls.find((call) => call.method === "copyMessages" && call.payload.chat_id === "1");
+  assert.ok(copy);
+  assert.equal((await db.prepare("SELECT COUNT(*) n FROM message_map WHERE target_chat_id = '1'").first()).n, copy.payload.message_ids.length);
+  assert.equal((await db.prepare("SELECT state FROM media_groups").first()).state, "done");
+}));
+
+test("General 無法發送時封鎖通知改發管理者私訊；暫時錯誤與話題刪除不觸發備援", () => withDatabaseMock(async (db) => {
+  const env = auditEnv(db), calls = [];
+  globalThis.fetch = recordCalls(calls);
+  await processUpdate({ message: adminMessage(10, "/keywords add 加群") }, env);
+  calls.length = 0;
+  globalThis.fetch = groupDownFetch(calls, "Bad Request: TOPIC_CLOSED", 400);
+  await processUpdate({ message: userMessage(20, { text: "加群" }) }, env);
+  assert.deepEqual(calls.map((call) => call.payload.chat_id), ["-1001", "1"]);
+  assert.ok(calls[1].payload.text.includes("<code>加群</code>"));
+  assert.equal(calls.some((call) => call.payload.text?.startsWith(t("zh", "groupUnavailable"))), false);
+}));
+
+test("Telegram 暫時錯誤不改走私訊備援，仍交由重試處理", () => withDatabaseMock(async (db) => {
+  seedAuditUser(db);
+  const env = auditEnv(db), calls = [];
+  globalThis.fetch = groupDownFetch(calls, "Internal Server Error", 500);
+  assert.equal((await worker.fetch(auditRequest(9400, userMessage(10, { text: "稍後重試" })), env)).status, 500);
+  assert.equal(calls.some((call) => call.payload.chat_id === "1"), false);
+}));

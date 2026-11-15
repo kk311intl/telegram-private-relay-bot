@@ -14,7 +14,24 @@ const messages = {
     keywordsList: "關鍵字黑名單（{count} 個）：",
     keywordsEmpty: "關鍵字黑名單目前是空的。",
     keywordsLimit: "未變更：最多 {max} 個關鍵字，每個最多 {length} 字。",
-    keywordsControls: "/keywords add 詞1,詞2 — 加入\n/keywords del 詞1,詞2 — 移除\n多個用英文逗號分隔；不分大小寫與全半形，英文與數字須整個單字相符，中日文出現即算。使用者的文字或說明含任一關鍵字時不轉送，並自動封鎖該使用者；可用 /unblock USER_ID 解除。僅管理者私訊可修改。",
+    keywordsControls: "/keywords add 詞1,詞2 — 加入\n/keywords del 詞1,詞2 — 移除\n/keywords clear — 清空\n多個用英文逗號分隔；不分大小寫與全半形，英文與數字須整個單字相符，中日文出現即算。比對文字、說明、隱藏連結、按鈕、顯示名稱與轉貼來源，命中時不轉送並自動封鎖；可用 /unblock USER_ID 解除。僅管理者私訊可修改。",
+    autoBlocked: "已依關鍵字自動封鎖",
+    matchedKeyword: "觸發關鍵字",
+    blockedAt: "時間",
+    unblockHint: "解除封鎖",
+    blockNoticeOn: "自動封鎖通知：已開啟",
+    blockNoticeOff: "自動封鎖通知：已關閉",
+    blockNoticeTopic: "通知會發到管理群組的 General。",
+    blockNoticeDirect: "通知會發到管理者私訊。",
+    blockNoticeControls: "/blocknotice on — 開啟\n/blocknotice off — 關閉",
+    blockedList: "封鎖中的使用者",
+    blockedListLatest: "（顯示最近 {count} 位）",
+    blockedListEmpty: "目前沒有封鎖中的使用者。",
+    blockedListHint: "用 /unblock USER_ID 解除封鎖。",
+    command_blocked: "查看封鎖清單",
+    command_blocknotice: "開關自動封鎖通知",
+    groupUnavailable: "管理群組目前無法使用，使用者訊息已改轉到這裡。直接回覆轉來的訊息即可送回；群組恢復後，新訊息會自動回到話題。此提示每小時最多一則。",
+    failureReason: "原因",
     replyRequired: "這則訊息未送出。請使用「回覆」選擇 Bot 轉來的使用者訊息。",
     topicRequired: "這則訊息未送出。請在對應使用者的話題內回覆。",
     replyUnavailable: "這則訊息未送出：轉送對照已失效或不存在。請使用對方的新訊息或最新話題回覆。",
@@ -35,7 +52,10 @@ const messages = {
 
 私訊 Bot：
 /unblock USER_ID — 依 ID 解除封鎖
-/keywords — 查看關鍵字黑名單；用 add／del 增刪
+/keywords — 查看關鍵字黑名單；用 add／del／clear 修改
+/blocked — 查看封鎖清單
+/blocknotice — 查看自動封鎖通知；用 on／off 開關
+群組無法使用時，訊息改轉到私訊，直接回覆即可送回。
 
 話題內的一般訊息會送給該使用者。`,
     adminHelpDirect: `管理者私訊模式
@@ -48,7 +68,9 @@ const messages = {
 私訊 Bot：
 /status — 查看近 24 小時處理狀態
 /unblock USER_ID — 依 ID 解除封鎖
-/keywords — 查看關鍵字黑名單；用 add／del 增刪
+/keywords — 查看關鍵字黑名單；用 add／del／clear 修改
+/blocked — 查看封鎖清單
+/blocknotice — 查看自動封鎖通知；用 on／off 開關
 
 一般回覆會送給該使用者。`,
     adminStatus: "近 24 小時處理狀態",
@@ -110,7 +132,24 @@ const messages = {
     keywordsList: "キーワードのブロックリスト（{count} 件）：",
     keywordsEmpty: "キーワードのブロックリストは空です。",
     keywordsLimit: "変更していません：最大 {max} 件、各 {length} 文字までです。",
-    keywordsControls: "/keywords add 語1,語2 — 追加\n/keywords del 語1,語2 — 削除\n複数は半角カンマで区切ります。大文字小文字・全角半角は区別しません。英字と数字は単語全体が一致した場合のみ、中国語・日本語は含まれていれば一致とします。ユーザーのテキストやキャプションにいずれかが含まれると転送せず、そのユーザーを自動でブロックします。/unblock USER_ID で解除できます。管理者の個別チャットでのみ変更できます。",
+    keywordsControls: "/keywords add 語1,語2 — 追加\n/keywords del 語1,語2 — 削除\n/keywords clear — すべて削除\n複数は半角カンマで区切ります。大文字小文字・全角半角は区別しません。英字と数字は単語全体が一致した場合のみ、中国語・日本語は含まれていれば一致とします。テキスト、キャプション、隠しリンク、ボタン、表示名、転送元を照合し、一致すると転送せず自動でブロックします。/unblock USER_ID で解除できます。管理者の個別チャットでのみ変更できます。",
+    autoBlocked: "キーワードにより自動ブロックしました",
+    matchedKeyword: "一致したキーワード",
+    blockedAt: "日時",
+    unblockHint: "解除",
+    blockNoticeOn: "自動ブロック通知：有効",
+    blockNoticeOff: "自動ブロック通知：無効",
+    blockNoticeTopic: "通知は管理グループの General に送ります。",
+    blockNoticeDirect: "通知は管理者の個別チャットに送ります。",
+    blockNoticeControls: "/blocknotice on — 有効にする\n/blocknotice off — 無効にする",
+    blockedList: "ブロック中のユーザー",
+    blockedListLatest: "（最新 {count} 件を表示）",
+    blockedListEmpty: "ブロック中のユーザーはいません。",
+    blockedListHint: "/unblock USER_ID で解除できます。",
+    command_blocked: "ブロック一覧を表示",
+    command_blocknotice: "自動ブロック通知を設定",
+    groupUnavailable: "管理グループが現在使えないため、ユーザーのメッセージをこちらに転送しています。転送されたメッセージに返信すると相手に届きます。グループが復旧すると、新しいメッセージは自動でトピックに戻ります。この通知は1時間に最大1回です。",
+    failureReason: "原因",
     replyRequired: "このメッセージは送信されていません。Bot が転送したユーザーのメッセージを選んで返信してください。",
     topicRequired: "このメッセージは送信されていません。該当ユーザーのトピックで返信してください。",
     replyUnavailable: "このメッセージは送信されていません。転送の対応情報が失効したか、存在しません。ユーザーの新しいメッセージか最新のトピックから返信してください。",
@@ -131,7 +170,10 @@ const messages = {
 
 Bot との個別チャット：
 /unblock USER_ID — ID でブロックを解除
-/keywords — キーワードのブロックリストを表示・編集（add／del）
+/keywords — キーワードのブロックリストを表示・編集（add／del／clear）
+/blocked — ブロック一覧を表示
+/blocknotice — 自動ブロック通知を表示・設定（on／off）
+グループが使えない間はメッセージをこの個別チャットに転送し、返信すると相手に届きます。
 
 トピック内の通常のメッセージは、そのユーザーに送られます。`,
     adminHelpDirect: `管理者個別チャットモード
@@ -144,7 +186,9 @@ Bot との個別チャット：
 Bot との個別チャット：
 /status — 過去24時間の処理状況を表示
 /unblock USER_ID — ID でブロックを解除
-/keywords — キーワードのブロックリストを表示・編集（add／del）
+/keywords — キーワードのブロックリストを表示・編集（add／del／clear）
+/blocked — ブロック一覧を表示
+/blocknotice — 自動ブロック通知を表示・設定（on／off）
 
 通常の返信は、そのユーザーに送られます。`,
     adminStatus: "過去24時間の処理状況",
@@ -206,7 +250,24 @@ Bot との個別チャット：
     keywordsList: "Keyword blocklist ({count}):",
     keywordsEmpty: "The keyword blocklist is empty.",
     keywordsLimit: "Not changed: up to {max} keywords, {length} characters each.",
-    keywordsControls: "/keywords add word1,word2 — Add\n/keywords del word1,word2 — Remove\nSeparate multiple keywords with commas. Matching ignores case and full/half width. Latin words and numbers must match as whole words; Chinese and Japanese match anywhere. User text or captions containing any keyword are not relayed, and the sender is blocked automatically; use /unblock USER_ID to undo. Only the admin can change this in their private chat.",
+    keywordsControls: "/keywords add word1,word2 — Add\n/keywords del word1,word2 — Remove\n/keywords clear — Remove all\nSeparate multiple keywords with commas. Matching ignores case and full/half width. Latin words and numbers must match as whole words; Chinese and Japanese match anywhere. Text, captions, hidden links, buttons, display names, and forward sources are checked; a match is not relayed and the sender is blocked automatically. Use /unblock USER_ID to undo. Only the admin can change this in their private chat.",
+    autoBlocked: "Blocked automatically by keyword",
+    matchedKeyword: "Matched keyword",
+    blockedAt: "Time",
+    unblockHint: "Unblock",
+    blockNoticeOn: "Auto-block notices: on",
+    blockNoticeOff: "Auto-block notices: off",
+    blockNoticeTopic: "Notices go to the admin group's General topic.",
+    blockNoticeDirect: "Notices go to the admin's private chat.",
+    blockNoticeControls: "/blocknotice on — Turn on\n/blocknotice off — Turn off",
+    blockedList: "Blocked users",
+    blockedListLatest: " (latest {count} shown)",
+    blockedListEmpty: "No users are blocked.",
+    blockedListHint: "Use /unblock USER_ID to unblock.",
+    command_blocked: "Show blocked users",
+    command_blocknotice: "Manage auto-block notices",
+    groupUnavailable: "The admin group is currently unavailable, so user messages are being relayed here. Reply to a relayed message to send it back. Once the group works again, new messages return to topics automatically. This alert is sent at most once an hour.",
+    failureReason: "Reason",
     replyRequired: "This message was not sent. Use Reply on a user message relayed by the bot.",
     topicRequired: "This message was not sent. Reply in the matching user's topic.",
     replyUnavailable: "This message was not sent: the relay mapping has expired or does not exist. Reply to a new message from the user or use their latest topic.",
@@ -227,7 +288,10 @@ In a user's topic:
 
 In your private chat with the bot:
 /unblock USER_ID — Unblock by ID
-/keywords — Show the keyword blocklist; use add/del to edit it
+/keywords — Show the keyword blocklist; use add/del/clear to edit it
+/blocked — Show blocked users
+/blocknotice — Show auto-block notices; use on/off to change them
+If the group is unavailable, messages are relayed to this private chat instead; reply to send them back.
 
 Regular messages in the topic go to that user.`,
     adminHelpDirect: `Admin private-chat mode
@@ -240,7 +304,9 @@ Reply to a relayed message:
 In your private chat with the bot:
 /status — Show processing status for the past 24 hours
 /unblock USER_ID — Unblock by ID
-/keywords — Show the keyword blocklist; use add/del to edit it
+/keywords — Show the keyword blocklist; use add/del/clear to edit it
+/blocked — Show blocked users
+/blocknotice — Show auto-block notices; use on/off to change them
 
 Regular replies go to that user.`,
     adminStatus: "Processing status — past 24 hours",

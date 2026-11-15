@@ -1,0 +1,1 @@
+ALTER TABLE bot_settings ADD COLUMN group_alert_at INTEGER NOT NULL DEFAULT 0;

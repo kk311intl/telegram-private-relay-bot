@@ -19,7 +19,7 @@ $oldToken = [Environment]::GetEnvironmentVariable('CLOUDFLARE_API_TOKEN', 'Proce
 try {
     [Environment]::SetEnvironmentVariable('CLOUDFLARE_API_TOKEN', $plainToken, 'Process')
     if (-not (Get-Command node.exe -ErrorAction SilentlyContinue)) {
-        throw '找不到 Node.js。請先安裝 Node.js 22 以上版本。'
+        throw '找不到 Node.js。請先安裝 Node.js 24 以上版本。'
     }
     $wrangler = Join-Path $projectRoot 'node_modules/.bin/wrangler.cmd'
     if (-not (Test-Path -LiteralPath $wrangler)) {

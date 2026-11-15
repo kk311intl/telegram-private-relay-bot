@@ -13,6 +13,8 @@ const KEYWORD_CACHE_MS = 60_000;
 const MAX_KEYWORDS = 100;
 const MAX_KEYWORD_LENGTH = 30;
 const WORD_CHAR = /[\p{Script=Latin}\p{Nd}_]/u;
+const BLOCKED_LIST_LIMIT = 30;
+const GROUP_ALERT_SECONDS = 3600;
 const USER_LANGUAGES = { zh: "中文", en: "English", ja: "日本語" };
 let botIdentity;
 let languageWebhookToken;
@@ -178,6 +180,8 @@ async function processAdminPrivateMessage(message, env) {
   }
   if (command === "status") return sendAdminStatus(message.chat.id, undefined, env);
   if (command === "keywords") return processKeywordCommand(message, env);
+  if (command === "blocknotice") return processBlockNoticeCommand(message, env);
+  if (command === "blocked") return sendBlockedList(message, env);
   if (command === "unblock") {
     const targetId = /^\/unblock(?:@[A-Za-z0-9_]+)?\s+(\d+)\s*$/i.exec(message.text.trim())?.[1];
     if (targetId) {
@@ -191,7 +195,7 @@ async function processAdminPrivateMessage(message, env) {
       });
       return;
     }
-    if (env.ADMIN_GROUP_ID) {
+    if (env.ADMIN_GROUP_ID && !message.reply_to_message) {
       await telegram(env, "sendMessage", {
         chat_id: message.chat.id,
         text: t(env.BOT_LANGUAGE, "adminHelpTopic")
@@ -201,6 +205,8 @@ async function processAdminPrivateMessage(message, env) {
   }
 
   if (!env.ADMIN_GROUP_ID) return processDirectAdminReply(message, env);
+  // Replies to messages relayed here while the admin group was unavailable go back to that user.
+  if (message.reply_to_message) return processDirectAdminReply(message, env, "topicRequired");
   return sendAdminReplyHint(message, env, "topicRequired");
 }
 
@@ -214,8 +220,8 @@ async function configureAdminMenu(env) {
     await telegram(env, "setMyCommands", {
       scope: { type: "chat", chat_id: env.ADMIN_USER_ID },
       commands: commands(env.ADMIN_GROUP_ID
-        ? ["start", "help", "status", "keywords", "unblock"]
-        : ["start", "help", "status", "keywords", "user", "block", "unblock"])
+        ? ["start", "help", "status", "keywords", "blocked", "blocknotice", "unblock"]
+        : ["start", "help", "status", "keywords", "blocked", "blocknotice", "user", "block", "unblock"])
     });
     if (env.ADMIN_GROUP_ID) {
       await telegram(env, "setMyCommands", {
@@ -350,7 +356,8 @@ async function processUserMessage(message, env) {
     return;
   }
   // Matches are dropped silently and the sender is blocked before any profile, topic or route is written.
-  if (await containsBlockedKeyword(message, env)) return blockByKeyword(env.BOT_DB, userId, now);
+  const keyword = await findBlockedKeyword(message, env);
+  if (keyword) return blockByKeyword(message, keyword, env);
   if (await getMessageMap(env.BOT_DB, String(message.chat.id), message.message_id)) return;
 
   const interval = clampInteger(
@@ -385,7 +392,16 @@ async function processUserMessage(message, env) {
   if (!env.ADMIN_GROUP_ID) {
     return relayUserMessageToAdmin(message, user, env, now);
   }
+  try {
+    return await relayUserMessageToTopic(message, user, env, now);
+  } catch (error) {
+    if (!isGroupUnavailable(error, env)) throw error;
+    await alertGroupUnavailable(error, env);
+    return relayUserMessageToAdmin(message, user, env, now);
+  }
+}
 
+async function relayUserMessageToTopic(message, user, env, now) {
   user = await ensureUserTopic(user, message.from, env);
 
   const replyParameters = await targetReplyParameters(
@@ -524,42 +540,104 @@ function readKeywordList(value) {
   }
 }
 
-function cacheKeywords(env, list) {
-  const entry = { list, normalized: list.map(normalizeKeyword), expires: Date.now() + KEYWORD_CACHE_MS };
+function cacheSettings(env, list, notify) {
+  const entry = { list, normalized: list.map(normalizeKeyword), notify: notify !== 0,
+    expires: Date.now() + KEYWORD_CACHE_MS };
   keywordCache.set(env.BOT_DB, entry);
   return entry;
 }
 
 async function readKeywordSettings(env) {
-  const row = await env.BOT_DB.prepare(
-    "SELECT blocked_keywords, keywords_message_id FROM bot_settings WHERE id = 1"
-  ).first();
+  const row = await env.BOT_DB.prepare(`
+    SELECT blocked_keywords, keywords_message_id, block_notice, block_notice_message_id
+    FROM bot_settings WHERE id = 1
+  `).first();
   if (!row) throw new RetryableError("關鍵字設定遺失，暫停處理");
   return row;
 }
 
-async function loadKeywords(env) {
+async function refreshSettings(env) {
+  const row = await readKeywordSettings(env);
+  return cacheSettings(env, readKeywordList(row.blocked_keywords), row.block_notice);
+}
+
+async function loadSettings(env) {
   const cached = keywordCache.get(env.BOT_DB);
   if (cached && cached.expires > Date.now()) return cached;
-  return cacheKeywords(env, readKeywordList((await readKeywordSettings(env)).blocked_keywords));
+  return refreshSettings(env);
 }
 
-async function containsBlockedKeyword(message, env) {
-  const text = [message.text, message.caption].filter((value) => typeof value === "string").join("\n");
-  if (!normalizeKeyword(text)) return false;
-  const { normalized } = await loadKeywords(env);
-  if (!normalized.length) return false;
-  const haystack = normalizeKeyword(text);
-  return normalized.some((keyword) => matchesKeyword(haystack, keyword));
+// Spam often hides in link targets, buttons, display names or forward sources rather than the text.
+function keywordSources(message) {
+  const entities = [...(message.entities || []), ...(message.caption_entities || [])];
+  const buttons = (message.reply_markup?.inline_keyboard || []).flat();
+  const origin = message.forward_origin || {};
+  return [
+    message.text, message.caption,
+    ...entities.map((entity) => entity?.type === "text_link" ? entity.url : null),
+    ...buttons.flatMap((button) => [button?.text, button?.url]),
+    message.from?.first_name, message.from?.last_name, message.from?.username,
+    origin.sender_user?.first_name, origin.sender_user?.last_name, origin.sender_user?.username,
+    origin.sender_user_name, origin.chat?.title, origin.chat?.username, origin.author_signature
+  ].filter((value) => typeof value === "string" && value);
 }
 
-async function blockByKeyword(db, userId, now) {
+async function findBlockedKeyword(message, env) {
+  const haystack = normalizeKeyword(keywordSources(message).join("\n"));
+  if (!haystack) return null;
+  const { list, normalized } = await loadSettings(env);
+  const index = normalized.findIndex((keyword) => matchesKeyword(haystack, keyword));
+  return index >= 0 ? list[index] : null;
+}
+
+async function blockByKeyword(message, keyword, env) {
+  const now = Math.floor(Date.now() / 1000), from = message.from;
   // The notice timestamp keeps the first follow-up hour silent; later messages get the usual blocked notice.
-  await db.prepare(`
-    INSERT INTO users(user_id, created_at, updated_at, blocked, blocked_notice_at) VALUES (?, ?, ?, 1, ?)
+  const result = await env.BOT_DB.prepare(`
+    INSERT INTO users(user_id, username, first_name, last_name, created_at, updated_at, blocked, blocked_notice_at)
+    VALUES (?, ?, ?, ?, ?, ?, 1, ?)
     ON CONFLICT(user_id) DO UPDATE SET blocked = 1, blocked_notice_at = excluded.blocked_notice_at,
       updated_at = excluded.updated_at
-  `).bind(userId, now, now, now).run();
+    WHERE users.blocked = 0
+  `).bind(String(from.id), from.username || null, from.first_name || "", from.last_name || "", now, now, now).run();
+  // Only the update that actually blocked the sender reports it, so retries and floods notify once.
+  if (Number(result.meta?.changes || 0) !== 1 || !(await loadSettings(env)).notify) return;
+  const language = env.BOT_LANGUAGE;
+  const separator = t(language, "fieldSeparator");
+  const name = safeIdentityText([from.first_name, from.last_name].filter(Boolean).join(" "));
+  const text = [
+    `<b>${t(language, "autoBlocked")}</b>`,
+    `${t(language, "matchedKeyword")}${separator}<code>${escapeHtml(keyword)}</code>`,
+    `${t(language, "blockedAt")}${separator}${escapeHtml(formatDateTime(now, env))}`,
+    `${t(language, "name")}${separator}${escapeHtml(truncate(name, 64)) || t(language, "notProvided")}`,
+    `${t(language, "username")}${separator}${from.username
+      ? `@${escapeHtml(safeIdentityText(from.username))}` : t(language, "notSet")}`,
+    `User ID${separator}<code>${escapeHtml(String(from.id))}</code>`,
+    `${t(language, "unblockHint")}${separator}<code>/unblock ${escapeHtml(String(from.id))}</code>`
+  ].join("\n");
+  const send = (chatId) => telegram(env, "sendMessage", { chat_id: chatId, parse_mode: "HTML", text });
+  // Best effort: the block is already stored, and a retry must not block or notify twice.
+  try {
+    await send(env.ADMIN_GROUP_ID || env.ADMIN_USER_ID);
+  } catch (error) {
+    try {
+      // A closed General topic or an unusable group still reaches the admin privately.
+      if (!env.ADMIN_GROUP_ID || isRetryableError(error)) throw error;
+      if (isGroupUnavailable(error, env)) await alertGroupUnavailable(error, env);
+      await send(env.ADMIN_USER_ID);
+    } catch (fallbackError) {
+      console.log(JSON.stringify({ event: "block_notice_failed", error: sanitizeError(fallbackError) }));
+    }
+  }
+}
+
+export function formatDateTime(seconds, env) {
+  const timeZone = env.TIME_ZONE || "UTC";
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+    timeZone, year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23"
+  }).formatToParts(new Date(seconds * 1000)).map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second} (${timeZone})`;
 }
 
 async function updateKeywords(env, messageId, change) {
@@ -567,26 +645,27 @@ async function updateKeywords(env, messageId, change) {
     const row = await readKeywordSettings(env);
     const current = readKeywordList(row.blocked_keywords);
     // Retried or older commands only report the current list; they never overwrite newer edits.
-    if (row.keywords_message_id >= messageId) return { list: cacheKeywords(env, current).list };
+    if (row.keywords_message_id >= messageId) return { list: cacheSettings(env, current, row.block_notice).list };
     const next = change(current);
     if (next.error) return next;
     const result = await env.BOT_DB.prepare(`
       UPDATE bot_settings SET blocked_keywords = ?, keywords_message_id = ?
       WHERE id = 1 AND keywords_message_id = ? AND blocked_keywords = ?
     `).bind(JSON.stringify(next.list), messageId, row.keywords_message_id, row.blocked_keywords).run();
-    if (Number(result.meta?.changes || 0) === 1) return { list: cacheKeywords(env, next.list).list };
+    if (Number(result.meta?.changes || 0) === 1) return { list: cacheSettings(env, next.list, row.block_notice).list };
   }
   throw new RetryableError("關鍵字設定同時被修改，稍後重試");
 }
 
 async function processKeywordCommand(message, env) {
   const language = env.BOT_LANGUAGE;
-  const match = /^\/keywords(?:@[A-Za-z0-9_]+)?\s+(add|del)\s+([\s\S]+)$/i.exec(message.text.trim());
-  const items = match ? parseKeywordInput(match[2]) : [];
+  const match = /^\/keywords(?:@[A-Za-z0-9_]+)?\s+(?:(add|del)\s+([\s\S]+)|(clear))$/i.exec(message.text.trim());
+  const action = match ? (match[1] || match[3]).toLowerCase() : null;
+  const items = match?.[2] ? parseKeywordInput(match[2]) : [];
   let outcome;
-  if (match && items.length) {
-    const action = match[1].toLowerCase();
+  if (action === "clear" || items.length) {
     outcome = await updateKeywords(env, message.message_id, (current) => {
+      if (action === "clear") return { list: [] };
       if (action === "del") {
         const removed = new Set(items.map(normalizeKeyword));
         return { list: current.filter((item) => !removed.has(normalizeKeyword(item))) };
@@ -601,7 +680,7 @@ async function processKeywordCommand(message, env) {
       return list.length > MAX_KEYWORDS ? { error: true } : { list };
     });
   } else {
-    outcome = { list: (await loadKeywords(env)).list };
+    outcome = { list: (await loadSettings(env)).list };
   }
   const summary = outcome.error
     ? t(language, "keywordsLimit").replace("{max}", MAX_KEYWORDS).replace("{length}", MAX_KEYWORD_LENGTH)
@@ -611,6 +690,49 @@ async function processKeywordCommand(message, env) {
   await telegram(env, "sendMessage", {
     chat_id: message.chat.id,
     text: summary + "\n\n" + t(language, "keywordsControls")
+  });
+}
+
+async function processBlockNoticeCommand(message, env) {
+  const mode = /^\/blocknotice(?:@[A-Za-z0-9_]+)?\s+(on|off)\s*$/i.exec(message.text.trim())?.[1].toLowerCase();
+  if (mode) {
+    await env.BOT_DB.prepare(`
+      UPDATE bot_settings SET block_notice = ?, block_notice_message_id = ?
+      WHERE id = 1 AND block_notice_message_id < ?
+    `).bind(mode === "on" ? 1 : 0, message.message_id, message.message_id).run();
+  }
+  const { notify } = mode ? await refreshSettings(env) : await loadSettings(env);
+  const language = env.BOT_LANGUAGE;
+  await telegram(env, "sendMessage", {
+    chat_id: message.chat.id,
+    text: t(language, notify ? "blockNoticeOn" : "blockNoticeOff") + "\n\n"
+      + t(language, env.ADMIN_GROUP_ID ? "blockNoticeTopic" : "blockNoticeDirect") + "\n"
+      + t(language, "blockNoticeControls")
+  });
+}
+
+async function sendBlockedList(message, env) {
+  const language = env.BOT_LANGUAGE;
+  const separator = t(language, "fieldSeparator");
+  const total = await env.BOT_DB.prepare("SELECT COUNT(*) AS total FROM users WHERE blocked = 1").first();
+  const rows = (await env.BOT_DB.prepare(`
+    SELECT user_id, username, first_name, last_name, updated_at FROM users
+    WHERE blocked = 1 ORDER BY updated_at DESC LIMIT ?
+  `).bind(BLOCKED_LIST_LIMIT).all()).results || [];
+  const lines = rows.map((row) => {
+    const name = truncate(safeIdentityText([row.first_name, row.last_name].filter(Boolean).join(" ")), 32);
+    return [`<code>${escapeHtml(row.user_id)}</code>`, escapeHtml(name) || t(language, "notProvided"),
+      row.username ? `@${escapeHtml(safeIdentityText(row.username))}` : null,
+      escapeHtml(formatDateTime(row.updated_at, env).slice(0, 16))].filter(Boolean).join(" · ");
+  });
+  await telegram(env, "sendMessage", {
+    chat_id: message.chat.id,
+    parse_mode: "HTML",
+    text: rows.length
+      ? [`${t(language, "blockedList")}${separator}${total?.total || rows.length}`
+        + (Number(total?.total) > rows.length ? t(language, "blockedListLatest").replace("{count}", rows.length) : ""),
+        "", ...lines, "", t(language, "blockedListHint")].join("\n")
+      : t(language, "blockedListEmpty")
   });
 }
 
@@ -647,7 +769,7 @@ export async function relayUserMessageToAdmin(message, user, env, now) {
   await saveCopiedMessage(env, user, message, copied, env.ADMIN_USER_ID, now);
 }
 
-export async function processDirectAdminReply(message, env) {
+export async function processDirectAdminReply(message, env, missingKey = "replyUnavailable") {
   if (await getMessageMap(env.BOT_DB, String(message.chat.id), message.message_id)) return;
   const repliedMessageId = message.reply_to_message?.message_id;
   if (!repliedMessageId) {
@@ -668,7 +790,7 @@ export async function processDirectAdminReply(message, env) {
     WHERE target_chat_id = ? AND target_message_id = ?
   `).bind(String(env.ADMIN_USER_ID), repliedMessageId).first();
   if (!mapping) {
-    return sendAdminReplyHint(message, env, "replyUnavailable");
+    return sendAdminReplyHint(message, env, missingKey);
   }
 
   const user = await getUser(env.BOT_DB, mapping.user_id);
@@ -832,8 +954,8 @@ async function processEditedMessage(message, env) {
   const chatId = String(message.chat.id);
   const isUserEdit = message.chat.type === "private" && String(message.from?.id) !== String(env.ADMIN_USER_ID);
   const isAdminTopicEdit = chatId === String(env.ADMIN_GROUP_ID) && String(message.from?.id) === String(env.ADMIN_USER_ID);
-  const isAdminPrivateEdit = !env.ADMIN_GROUP_ID
-    && message.chat.type === "private"
+  // In topic mode this only syncs replies made privately while the group was unavailable.
+  const isAdminPrivateEdit = message.chat.type === "private"
     && String(message.from?.id) === String(env.ADMIN_USER_ID);
   if (!isUserEdit && !isAdminTopicEdit && !isAdminPrivateEdit) return;
 
@@ -841,9 +963,8 @@ async function processEditedMessage(message, env) {
   if (isUserEdit) {
     editingUser = await getUser(env.BOT_DB, String(message.from.id));
     if (editingUser?.blocked || editingUser?.erased) return;
-    if (await containsBlockedKeyword(message, env)) {
-      return blockByKeyword(env.BOT_DB, String(message.from.id), Math.floor(Date.now() / 1000));
-    }
+    const keyword = await findBlockedKeyword(message, env);
+    if (keyword) return blockByKeyword(message, keyword, env);
   }
   const mapping = await env.BOT_DB.prepare(
     "SELECT target_chat_id, target_message_id, user_id FROM message_map WHERE source_chat_id = ? AND source_message_id = ?"
@@ -852,7 +973,7 @@ async function processEditedMessage(message, env) {
     // Messages held by the retired arithmetic check were never relayed.
     if (isUserEdit && message.message_id <= (editingUser?.captcha_message_id || 0)) return;
     if (parseCommand(message.text)) return;
-    if (isAdminPrivateEdit && !message.reply_to_message?.message_id) return;
+    if (isAdminPrivateEdit && (env.ADMIN_GROUP_ID || !message.reply_to_message?.message_id)) return;
     throw new RetryableError("編輯訊息尚未建立轉送映射");
   }
   if (isUserEdit && !editingUser) return;
@@ -1120,41 +1241,44 @@ async function deliverMediaGroup(group, env) {
   const user = await getUser(env.BOT_DB, group.user_id);
   if (!user || user.erased || user.generation !== group.user_generation) throw new ObsoleteWorkError();
   await requireCurrentUser(env.BOT_DB, user, group.direction === "user_to_admin");
-  let targetChatId = user.user_id;
-  let topicId;
-  if (group.direction === "user_to_admin") {
-    if (env.ADMIN_GROUP_ID) {
-      const topicUser = await ensureUserTopic(user, user, env);
-      targetChatId = String(env.ADMIN_GROUP_ID);
-      topicId = topicUser.topic_id;
-    } else {
-      targetChatId = String(env.ADMIN_USER_ID);
-      const recent = await getRecentAdminConversationReply(
-        env.BOT_DB,
-        user.user_id,
-        Math.floor(Date.now() / 1000),
-        env
-      );
-      if (!recent) await sendDirectUserHeader(user, env);
-    }
-  }
-
-  const copyParameters = {
-    chat_id: targetChatId,
+  const copyTo = (chatId, topicId) => telegramToTopic(env, "copyMessages", {
+    chat_id: chatId,
     from_chat_id: group.source_chat_id,
     message_ids: messageIds,
     message_thread_id: topicId
-  };
+  }, user);
+  let targetChatId = user.user_id;
   let copied;
-  try {
-    copied = await telegramToTopic(env, "copyMessages", copyParameters, user);
-  } catch (error) {
-    if (group.direction !== "user_to_admin" || !topicId || !isTopicMissing(error)) throw error;
-    await clearUserTopic(env.BOT_DB, user.user_id, topicId);
-    const topicUser = await ensureUserTopic({ ...user, topic_id: null }, user, env);
-    copyParameters.chat_id = env.ADMIN_GROUP_ID;
-    copyParameters.message_thread_id = topicUser.topic_id;
-    copied = await telegramToTopic(env, "copyMessages", copyParameters, user);
+  if (group.direction === "user_to_admin" && env.ADMIN_GROUP_ID) {
+    try {
+      let topicUser = await ensureUserTopic(user, user, env);
+      try {
+        copied = await copyTo(String(env.ADMIN_GROUP_ID), topicUser.topic_id);
+      } catch (error) {
+        if (!isTopicMissing(error)) throw error;
+        await clearUserTopic(env.BOT_DB, user.user_id, topicUser.topic_id);
+        topicUser = await ensureUserTopic({ ...user, topic_id: null }, user, env);
+        copied = await copyTo(String(env.ADMIN_GROUP_ID), topicUser.topic_id);
+      }
+      targetChatId = String(env.ADMIN_GROUP_ID);
+    } catch (error) {
+      if (!isGroupUnavailable(error, env)) throw error;
+      await alertGroupUnavailable(error, env);
+    }
+  }
+  if (group.direction === "user_to_admin" && !copied) {
+    // Admin private-chat mode, or the fallback when the admin group cannot be used.
+    targetChatId = String(env.ADMIN_USER_ID);
+    const recent = await getRecentAdminConversationReply(
+      env.BOT_DB,
+      user.user_id,
+      Math.floor(Date.now() / 1000),
+      env
+    );
+    if (!recent) await sendDirectUserHeader(user, env);
+    copied = await copyTo(targetChatId);
+  } else if (group.direction !== "user_to_admin") {
+    copied = await copyTo(targetChatId);
   }
 
   if (!Array.isArray(copied) || copied.length !== messageIds.length) {
@@ -1269,8 +1393,33 @@ async function sendRateLimitNotice(chatId, env) {
   });
 }
 
+// Permanent group-level failures (bot removed or muted, rights revoked, topics disabled), not per-topic problems.
+function isGroupUnavailable(error, env) {
+  return Boolean(env.ADMIN_GROUP_ID) && error instanceof TelegramApiError && !error.retryable
+    && /chat not found|bot was kicked|bot is not a member|not enough rights|have no rights|need administrator rights|chat_admin_required|not a forum|topics? (?:are |is )?disabled|upgraded to a supergroup|peer_id_invalid|channel_private/i
+      .test(error.description);
+}
+
+async function alertGroupUnavailable(error, env) {
+  const now = Math.floor(Date.now() / 1000);
+  // One conditional write per hour at most, and only while the group is failing.
+  const claimed = await env.BOT_DB.prepare(`
+    UPDATE bot_settings SET group_alert_at = ? WHERE id = 1 AND group_alert_at <= ?
+  `).bind(now, now - GROUP_ALERT_SECONDS).run().catch(() => null);
+  if (Number(claimed?.meta?.changes || 0) !== 1) return;
+  const language = env.BOT_LANGUAGE;
+  await telegram(env, "sendMessage", {
+    chat_id: env.ADMIN_USER_ID,
+    text: `${t(language, "groupUnavailable")}\n\n${t(language, "failureReason")}${t(language, "fieldSeparator")}`
+      + truncate(error.description, 200)
+  }).catch((alertError) => {
+    console.log(JSON.stringify({ event: "group_alert_failed", error: sanitizeError(alertError) }));
+  });
+}
+
 async function notifyUserCopyFailure(chatId, error, env) {
-  if (error instanceof ObsoleteWorkError || isRetryableError(error) || isTopicMissing(error)) return;
+  if (error instanceof ObsoleteWorkError || isRetryableError(error) || isTopicMissing(error)
+    || isGroupUnavailable(error, env)) return;
   await telegram(env, "sendMessage", {
     chat_id: chatId,
     text: userText(env, "unsupportedMessage", "UNSUPPORTED_MESSAGE")
@@ -1306,6 +1455,7 @@ class TelegramApiError extends Error {
   constructor(method, errorCode, description, parameters = {}) {
     super(`Telegram ${method} 失敗：${String(description).slice(0, 300)}`);
     this.name = "TelegramApiError";
+    this.description = String(description).slice(0, 300);
     this.errorCode = Number(errorCode || 0);
     this.retryAfter = Number(parameters.retry_after || 0);
     this.retryable = this.errorCode === 429 || this.errorCode >= 500;
@@ -1653,7 +1803,8 @@ async function readiness(env) {
         (SELECT lease_token FROM media_groups LIMIT 1) AS album_lease,
         (SELECT COUNT(*) FROM rate_admissions WHERE 0) AS admissions,
         (SELECT COUNT(*) FROM bot_settings WHERE id = 1 AND blocked_keywords IS NOT NULL
-          AND keywords_message_id >= 0) AS keyword_settings
+          AND keywords_message_id >= 0 AND block_notice IN (0, 1)
+          AND block_notice_message_id >= 0 AND group_alert_at >= 0) AS keyword_settings
     `).first();
     if (schema?.keyword_settings !== 1) throw new Error("關鍵字設定遺失");
     return json({ ok: true, service: "telegram-private-relay" });
@@ -1671,6 +1822,9 @@ export function configurationIssue(env) {
     if (!/^-100\d+$/.test(String(env.ADMIN_GROUP_ID))) return "ADMIN_GROUP_ID";
   }
   if (env.BOT_LANGUAGE != null && !["zh", "ja", "en"].includes(env.BOT_LANGUAGE)) return "BOT_LANGUAGE";
+  if (env.TIME_ZONE != null && env.TIME_ZONE !== "") {
+    try { new Intl.DateTimeFormat("en", { timeZone: env.TIME_ZONE }); } catch { return "TIME_ZONE"; }
+  }
   for (const name of ["WELCOME_MESSAGE", "BLOCKED_MESSAGE", "RATE_LIMIT_MESSAGE", "UNSUPPORTED_MESSAGE"]) {
     if (env[name] != null && (typeof env[name] !== "string" || env[name].length > 4096)) return name;
   }
