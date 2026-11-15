@@ -58,8 +58,7 @@ test("三種部署語言都有完整的訊息文字", () => {
     retryStopped: 1, statusLastRelay: 1, statusNoRelay: 1, statusLastError: 1,
     statusNoError: 1, failureRateLimit: 1, failureUnavailable: 1, failurePermission: 1,
     failureUnsupported: 1, failureProcessing: 1,
-    captchaPrompt: 1, captchaWrong: 1, captchaLocked: 1, captchaExpired: 1, captchaPassed: 1,
-    captchaEnabled: 1, captchaDisabled: 1, captchaControls: 1, command_captcha: 1, captchaPendingLost: 1,
+    keywordsList: 1, keywordsEmpty: 1, keywordsLimit: 1, keywordsControls: 1, command_keywords: 1,
     languageSaved: 1
   });
   for (const language of ["zh", "ja", "en"]) {

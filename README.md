@@ -2,7 +2,7 @@
 
 [中文](#zh) · [日本語](#ja) · [English](#en)
 
-Version: v1.3.1 · License: [GPL-3.0-only](LICENSE)
+Version: v1.4.0 · License: [GPL-3.0-only](LICENSE)
 
 <a id="zh"></a>
 
@@ -22,7 +22,7 @@ Version: v1.3.1 · License: [GPL-3.0-only](LICENSE)
 >
 > 遵守下方公開內容規則。Token 僅透過本機安全輸入或 Secret 欄位處理，不放入聊天、輸出或 Git；私有資料留在受 Git 忽略的位置。未經我要求，不覆寫既有設定、重建資源、輪替憑證、刪除還原備份、改寫程式、推送 GitHub 或建立 Release／tag。
 >
-> 首次聯絡的算術驗證預設開啟，除非我要求才關閉。升級時先套用所有待執行的資料庫遷移，並用測試帳號確認 `/start` 顯示歡迎與語言按鈕、歡迎訊息的按鈕可切換並保存三語偏好、首則內容才出題，通過後自動轉送。
+> 一般訊息直接轉送，不設驗證；垃圾訊息用關鍵字黑名單處理。升級時先套用所有待執行的資料庫遷移，並用測試帳號確認 `/start` 顯示歡迎與語言按鈕、歡迎訊息的按鈕可切換並保存三語偏好、一般訊息直接轉送；再由管理者 `/keywords add` 加入測試詞，確認含該詞的訊息不轉送且自動封鎖，最後 `/unblock` 測試帳號並 `/keywords del` 刪除測試詞。
 >
 > 最後檢查 `/health`、`/ready`、Webhook 和安全探針，指導我用非管理者帳號完成私訊往返測試。管理者私訊 `/start` 設定選單，再用 `/status` 確認。遇到阻礙時說明原因及下一個操作，不把未驗證項目當作完成。交付 Bot 連結、Worker 網址、模式、語言、驗證結果與憑證保管位置，不顯示秘密值。
 
@@ -82,7 +82,6 @@ Cloudflare API Token 需要該帳戶的 Workers Scripts Edit 和 D1 Edit 權限�
 | `RATE_LIMIT_MESSAGE` | Text，可選 | 覆蓋傳送過快提示 |
 | `UNSUPPORTED_MESSAGE` | Text，可選 | 覆蓋訊息無法轉送提示 |
 | `MESSAGE_INTERVAL_SECONDS` | Text，可選 | 一般訊息間隔，預設 2 秒，範圍 0–60 |
-| `CAPTCHA_ENABLED` | Text，可選 | 算術驗證的初始預設，`true`／`false`，預設 `true`；Bot 內管理者設定優先 |
 
 未設定的提示訊息使用對應語言的預設翻譯；自訂文字只覆蓋部署語言，最多 4096 字元，其他語言仍使用內建翻譯。[清理排程](https://developers.cloudflare.com/workers/configuration/cron-triggers/)在 `triggers.crons` 調整，採 UTC；範例 `17 3 * * *` 是每日 03:17 UTC，不是使用者本機時間。關閉排程也會停用定期清理。
 
@@ -112,7 +111,7 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 | 使用者私訊 Bot | `/start`、`/help`、`/id` | 歡迎訊息、使用說明、自己的 User ID |
 | 管理者私訊 Bot | `/start`、`/help`、`/status` | 設定選單、查指令、查近 24 小時處理狀態與 Webhook 待處理數 |
 | 管理者私訊 Bot | `/unblock USER_ID` | 依 ID 解封，包括已清除資料的封鎖者 |
-| 管理者私訊 Bot | `/captcha`、`/captcha on`、`/captcha off` | 查看、開啟或關閉首次聯絡驗證 |
+| 管理者私訊 Bot | `/keywords`、`/keywords add 詞1,詞2`、`/keywords del 詞1,詞2` | 查看、加入或移除關鍵字黑名單 |
 | 管理群組的使用者話題 | `/user`、`/block`、`/unblock`、`/close`、`/help`、`/status` | 查資料、封鎖／解封、關閉話題、查指令／狀態 |
 | 管理者私訊模式，管理者回覆轉來的訊息 | `/user`、`/block`、`/unblock` | 操作該訊息所屬的使用者 |
 
@@ -124,17 +123,15 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 
 `/status` 排除查詢本身，並顯示最近成功轉送距今多久及近 24 小時最近異常的簡短原因。這些資訊只在手動查詢時從既有紀錄讀取，不新增輪詢、資料表或排程；轉送時間以仍保留的對照為準。
 
-### 首次聯絡驗證
+### 關鍵字黑名單
 
-`/start` 顯示歡迎與語言按鈕，不出題也不免除驗證。新聯絡者傳第一則內容時，Bot 才說明為了攔截自動化廣告而要求算術驗證。5 分鐘內只回覆數字，除法都是整數；連錯 3 次暫停 15 分鐘。一般錯誤至少間隔 5 秒才計次及回覆；冷卻中的內容忽略。`/help`、`/id` 仍可直接輸入；切換語言不重置題目或錯誤次數。
+一般使用者直接傳訊即可，沒有驗證或答題。使用者的文字或媒體說明含黑名單中任一關鍵字時，Bot 不轉送、不回覆，並自動封鎖該使用者。比對不分大小寫與全半形，忽略不可見字元；英文與數字須整個單字相符（`ad` 不會命中 `address`），中日文沒有詞的邊界，出現即算，太短的中文詞可能誤擋。封鎖後 1 小時內不回應，之後沿用一般封鎖提示；誤判時用 `/unblock USER_ID` 解除。使用者把已轉送的訊息編輯成含關鍵字時，同樣不同步並封鎖。相簿逐則判斷，觸發封鎖後其餘項目不再轉送，已送出的不撤回。
 
-通過前只暫存第一則訊息的 Telegram ID；若是相簿，暫存同組最多 10 個 ID，不保存文字或媒體本體，也不建立話題。通過後自動轉送第一則內容或首組相簿，不必重送；答案與其他未驗證訊息不補送。題目過期或錯誤過多時清除待送紀錄，之後須重新傳送聯絡內容。暫存參照沿用原有相簿紀錄的清理週期。
+管理者私訊 Bot 傳 `/keywords` 查看名單，`/keywords add 詞1,詞2` 一次加入多個（英文逗號分隔，也接受全形逗號），`/keywords del 詞1,詞2` 移除。最多 100 個、每個 30 字以內，重複的自動略過。名單保存在 D1，修改無須重新部署。
 
-升級前套用所有待執行的資料庫遷移，包含 `0006_verification_pending_message.sql`。既有未清除的聯絡者免重驗，清除資料後返回則重新驗證。`CAPTCHA_ENABLED="false"` 可將初始狀態設為關閉；`WELCOME_MESSAGE` 仍用於使用者的 `/start`。
+用量：名單在每個暖 Worker 的記憶體快取 1 分鐘，正常訊息最多每分鐘多讀一筆設定；貼圖等沒有文字的訊息不讀。處理修改指令的 Worker 立即生效，其他 Worker 最遲 1 分鐘。命中時只寫入一筆封鎖，不建立話題或對照。沒有新增依賴、服務或排程；每個 Webhook 的既有去重寫入仍會消耗額度，這不是抗流量攻擊服務。
 
-管理者私訊 `/captcha` 查看狀態，用 `/captcha on` 或 `/captcha off` 切換，無須重新部署。開關保存在 D1，優先於部署預設；只在新聯絡者或未驗證者需要判斷時多讀取一筆設定。重新開啟不追溯要求已獲准聯絡者補驗，關閉也不解除既有封鎖。
-
-驗證只擋簡單自動廣告，能解題的程式或真人仍可通過。首則待送處理完成後，正常聊天不增加 D1 查詢或寫入；未通過者的控制紀錄在 7 天未活動後用原有排程清除。沒有新增依賴、服務或排程；每個 Webhook 的既有去重寫入仍會消耗額度，這不是抗流量攻擊服務。
+升級前套用 `0008_keyword_blocklist.sql`。原有的算術驗證與 `/captcha` 已移除，舊的 `CAPTCHA_ENABLED` 變數會被忽略；舊資料欄位保留不刪。升級時仍在答題的使用者之後直接轉送，暫存的第一則訊息不再補送。
 
 ### 資料與限制
 
@@ -187,7 +184,7 @@ Telegram の個別チャットを管理者へ転送し、Bot を通して返信�
 >
 > 下の公開ルールを守り、Token はローカルの安全な入力か Secret 欄だけで扱い、チャット・出力・Git に含めないでください。私有データは Git の対象外に置きます。依頼なしに既存設定の上書き、リソースの再作成、認証情報の更新、復旧用バックアップの削除、コード変更、GitHub への push、Release／tag の作成をしないでください。
 >
-> 初回の計算確認は既定で有効にし、私が依頼した場合だけ無効にしてください。未適用のデータベース移行を先に適用し、テストアカウントで `/start` の案内と言語ボタン、歓迎メッセージのボタンによる3言語の選択と保存、最初の内容での問題表示、確認後の自動転送を試してください。
+> 通常のメッセージは確認なしで転送し、迷惑メッセージはキーワードのブロックリストで扱ってください。未適用のデータベース移行を先に適用し、テストアカウントで `/start` の案内と言語ボタン、歓迎メッセージのボタンによる3言語の選択と保存、通常メッセージの転送を試してください。その後、管理者の `/keywords add` でテスト用の語を追加し、その語を含むメッセージが転送されず自動ブロックされることを確認し、最後にテストアカウントを `/unblock` して `/keywords del` で語を削除してください。
 >
 > 最後に `/health`、`/ready`、Webhook、安全なプローブを確認し、管理者以外のアカウントで送信と返信を試せるよう案内してください。管理者には Bot との個別チャットで `/start` と `/status` を使ってもらい。止まったら理由と次の操作を説明し、未確認の項目を完了扱いにしないでください。Bot のリンク、Worker URL、モード、言語、検証結果、認証情報の保管場所をまとめ、秘密の値は表示しないでください。
 
@@ -247,7 +244,6 @@ Cloudflare Worker の Variables and Secrets に次を設定します。
 | `RATE_LIMIT_MESSAGE` | Text、省略可 | 送信頻度の案内を上書き |
 | `UNSUPPORTED_MESSAGE` | Text、省略可 | 転送できないメッセージの案内を上書き |
 | `MESSAGE_INTERVAL_SECONDS` | Text、省略可 | 通常メッセージの間隔。既定は 2 秒、範囲は 0–60 |
-| `CAPTCHA_ENABLED` | Text、省略可 | 計算確認の初期設定。`true`／`false`、既定は `true`。Bot 内の管理者設定が優先 |
 
 未設定の案内は対応する言語の既定の翻訳を使います。カスタム文はデプロイ言語だけに適用し、最大 4096 文字です。他言語には組み込みの翻訳を使います。[クリーンアップのスケジュール](https://developers.cloudflare.com/workers/configuration/cron-triggers/)は `triggers.crons` で変更し、時刻は UTC です。例の `17 3 * * *` は毎日 03:17 UTC で、ユーザーの現地時刻ではありません。スケジュールを無効にすると定期クリーンアップも停止します。
 
@@ -277,7 +273,7 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 | Bot との個別チャット（ユーザー） | `/start`、`/help`、`/id` | 開始時のメッセージ、使い方、自分の User ID |
 | Bot との個別チャット（管理者） | `/start`、`/help`、`/status` | メニュー設定、コマンド案内、過去24時間の処理状況と Webhook 保留件数 |
 | Bot との個別チャット（管理者） | `/unblock USER_ID` | ID による解除。消去済みのブロックユーザーも対象 |
-| Bot との個別チャット（管理者） | `/captcha`、`/captcha on`、`/captcha off` | 初回の確認の状態表示、有効化、無効化 |
+| Bot との個別チャット（管理者） | `/keywords`、`/keywords add 語1,語2`、`/keywords del 語1,語2` | キーワードのブロックリストの表示、追加、削除 |
 | 管理グループのユーザートピック | `/user`、`/block`、`/unblock`、`/close`、`/help`、`/status` | 情報表示、ブロック／解除、トピックを閉じる、案内／状況確認 |
 | 管理者個別チャットモードで転送メッセージへの管理者の返信 | `/user`、`/block`、`/unblock` | そのメッセージのユーザーを操作 |
 
@@ -289,17 +285,15 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 
 `/status` は自身のリクエストを集計から除き、最後の転送成功からの経過時間と過去24時間の直近のエラー概要を表示します。手動確認時に既存の記録を読むだけで、ポーリング・テーブル・定期処理は追加しません。転送時刻は保存中の対応情報に基づきます。
 
-### 初回の確認
+### キーワードのブロックリスト
 
-`/start` は案内と言語ボタンを表示し、問題は出さず確認も免除しません。新しい連絡者が最初の内容を送ると、自動広告を防ぐための計算確認を案内します。5分以内に数字だけで答え、割り算は割り切れます。3回間違えると15分間待ちます。誤答への応答と計数は最低5秒間隔で、待機中の内容は無視します。`/help` と `/id` は直接入力できます。言語変更で問題や誤答回数はリセットされません。
+ユーザーは確認や問題なしでそのまま送信できます。テキストやメディアのキャプションにブロックリストのいずれかのキーワードが含まれると、Bot は転送も返信もせず、そのユーザーを自動でブロックします。大文字小文字・全角半角を区別せず、不可視文字は無視します。英字と数字は単語全体の一致が必要で（`ad` は `address` に一致しません）、中国語・日本語は単語の境界がないため含まれていれば一致し、短すぎる語は誤検知の原因になります。ブロック後1時間は応答せず、その後は通常のブロック通知を使います。誤検知は `/unblock USER_ID` で解除してください。転送済みメッセージをキーワード入りに編集した場合も同期せずブロックします。アルバムは1件ずつ判定し、ブロック後の残りは転送しません。送信済みの分は取り消しません。
 
-確認前は最初のメッセージの Telegram ID、アルバムなら同じ組の最大10件の ID のみ一時保存します。本文やメディア本体は保存せず、トピックも作りません。確認後に最初の内容またはアルバムを自動転送するため、再送は不要です。答えや他の未確認メッセージは転送しません。期限切れや誤答上限では待機記録を消し、連絡内容の再送が必要です。一時参照は既存のアルバム記録の定期処理で削除します。
+管理者は Bot との個別チャットで `/keywords` を送ると一覧を確認でき、`/keywords add 語1,語2` で複数を一度に追加（半角カンマ区切り、全角カンマも可）、`/keywords del 語1,語2` で削除します。最大100件、各30文字までで、重複は自動で除外します。一覧は D1 に保存され、変更に再デプロイは不要です。
 
-更新前に `0006_verification_pending_message.sql` を含む未適用のデータベース移行を適用してください。既存の消去されていない連絡者は再確認不要で、データ消去後は再確認が必要です。`CAPTCHA_ENABLED="false"` は初期設定を無効にします。`WELCOME_MESSAGE` はユーザーの `/start` に使います。
+使用量：一覧は稼働中の Worker ごとに1分間メモリにキャッシュするため、通常メッセージで追加される読み取りは1分に最大1件です。ステッカーなどテキストのないメッセージでは読みません。変更コマンドを処理した Worker では即時、他の Worker でも1分以内に反映されます。一致時はブロックを1件書き込むだけで、トピックや対応記録は作りません。依存関係・サービス・定期処理の追加はありませんが、Webhook の既存の重複防止処理は引き続き枠を消費します。大量アクセスを防ぐ仕組みではありません。
 
-管理者が個別チャットで `/captcha` を送ると状態を確認でき、`/captcha on` または `/captcha off` で切り替えます。再デプロイは不要で、設定は D1 に保持され、デプロイの初期設定より優先されます。新規または未確認ユーザーの判定時だけ、設定を1件追加で読みます。再有効化しても連絡を許可済みのユーザーに再確認は要求せず、無効化してもブロックは解除しません。
-
-単純な自動広告を減らすための確認で、計算できるプログラムや人は通過できます。最初の待機内容の処理後は、通常転送に D1 の読み書きは追加しません。未確認者の制御記録は7日間活動がなければ既存の定期処理で削除します。依存関係・サービス・定期処理の追加はありませんが、Webhook の既存の重複防止処理は引き続き枠を消費します。大量アクセスを防ぐ仕組みではありません。
+更新前に `0008_keyword_blocklist.sql` を適用してください。従来の計算確認と `/captcha` は削除し、古い `CAPTCHA_ENABLED` 変数は無視されます。古いデータ列は残します。更新時に回答待ちだったユーザーはその後そのまま転送され、一時保存された最初のメッセージは自動転送されません。
 
 ### データと制限
 
@@ -352,7 +346,7 @@ Give the repository link and this prompt to an AI coding assistant that can read
 >
 > Follow the public-content rules below. Handle tokens only through secure local input or Secret fields, never chat, output, or Git; keep private data in Git-ignored locations. Without my request, do not overwrite existing settings, recreate resources, rotate credentials, delete recovery backups, change source code, push to GitHub, or create a Release/tag.
 >
-> Keep the first-contact arithmetic check enabled unless I request otherwise. Apply all pending database migrations before upgrading. With a test account, verify the welcome and language buttons on `/start`, all three saved language choices on `/start`, the check on the first contact message, and automatic relay after passing.
+> Relay normal messages without any check; handle spam with the keyword blocklist. Apply all pending database migrations before upgrading. With a test account, verify the welcome and language buttons on `/start`, all three saved language choices, and normal relay. Then have the admin add a test word with `/keywords add`, confirm a message containing it is not relayed and the sender is blocked automatically, and finally `/unblock` the test account and remove the word with `/keywords del`.
 >
 > Verify `/health`, `/ready`, webhook status, and the safe runtime probe, then guide me through a real send-and-reply test with a non-admin account. Have the admin send `/start` and `/status` privately to the bot. If blocked, explain why and give my next action; do not report unverified work as complete. Finish with the bot link, Worker URL, mode, language, checks, and credential storage location, without secret values.
 
@@ -412,7 +406,6 @@ Set these under the Worker's Variables and Secrets in Cloudflare:
 | `RATE_LIMIT_MESSAGE` | Text, optional | Overrides the rate-limit notice |
 | `UNSUPPORTED_MESSAGE` | Text, optional | Overrides the unsupported-message notice |
 | `MESSAGE_INTERVAL_SECONDS` | Text, optional | Minimum interval for ordinary messages; default 2 seconds, range 0–60 |
-| `CAPTCHA_ENABLED` | Text, optional | Initial arithmetic-check default: `true` / `false`, default `true`; the admin's in-bot setting takes precedence |
 
 Unset notices use the matching language's defaults. Custom text applies only to the deployment language and is limited to 4096 characters; other languages use built-in translations. Change the [cleanup schedule](https://developers.cloudflare.com/workers/configuration/cron-triggers/) under `triggers.crons`, using UTC: the example `17 3 * * *` means daily at 03:17 UTC, not the user's local time. Disabling the schedule also disables periodic cleanup.
 
@@ -442,7 +435,7 @@ Users message the bot privately. The admin replies in the matching topic or, in 
 | User's private chat with the bot | `/start`, `/help`, `/id` | Welcome message, instructions, own User ID |
 | Admin's private chat with the bot | `/start`, `/help`, `/status` | Set command menu, show help, see 24-hour processing and webhook pending count |
 | Admin's private chat with the bot | `/unblock USER_ID` | Unblock by ID, including blocked users who erased their data |
-| Admin's private chat with the bot | `/captcha`, `/captcha on`, `/captcha off` | Show, enable, or disable the first-contact check |
+| Admin's private chat with the bot | `/keywords`, `/keywords add word1,word2`, `/keywords del word1,word2` | Show, add to, or remove from the keyword blocklist |
 | User topic in the admin group | `/user`, `/block`, `/unblock`, `/close`, `/help`, `/status` | User details, block/unblock, close topic, help/status |
 | Admin private-chat mode: reply to a relayed message | `/user`, `/block`, `/unblock` | Act on the user belonging to that message |
 
@@ -454,17 +447,15 @@ The user command menu contains only `/start`. Buttons below the welcome message 
 
 `/status` excludes its own request and shows the time since the latest successful relay and a brief summary of the latest issue in the past 24 hours. It reads existing records only when requested, with no added polling, tables, or schedules. Relay times reflect retained mappings.
 
-### First-contact check
+### Keyword blocklist
 
-`/start` shows the welcome and language buttons, without a question or a verification exemption. A new contact's first content message triggers an arithmetic check explaining that it reduces automated ads. Reply with digits only within 5 minutes; division always has an integer answer. Three wrong answers require a 15-minute wait. Wrong attempts and responses are spaced at least 5 seconds apart, and content during the cooldown is ignored. `/help` and `/id` remain available by typing them; changing language does not reset the question or wrong attempts.
+Users simply send messages, with no check or question. If a user's text or media caption contains any keyword on the blocklist, the bot does not relay or reply and blocks the sender automatically. Matching ignores case, full/half width, and invisible characters. Latin words and numbers must match whole (`ad` does not match `address`); Chinese and Japanese have no word boundaries and match anywhere, so very short CJK keywords can cause false positives. Blocked users get no response for the first hour, then the usual blocked notice. Undo a false positive with `/unblock USER_ID`. Editing a relayed message to include a keyword also blocks the sender without syncing the edit. Albums are checked item by item; after a block, remaining items are not relayed, and items already sent are not withdrawn.
 
-Before passing, only the first message's Telegram ID is staged, or up to 10 IDs belonging to the first album. No text or media content is stored and no topic is created. Passing automatically relays that first message or album, without resending. Answers and other unverified messages are not replayed. Expiry or too many wrong answers clears the pending references, requiring a new contact message. Temporary references use the existing album cleanup cycle.
+The admin sends `/keywords` privately to view the list, `/keywords add word1,word2` to add several at once (comma-separated; full-width commas also work), and `/keywords del word1,word2` to remove them. Up to 100 keywords of 30 characters each; duplicates are skipped. The list is stored in D1 and changes need no redeploy.
 
-Apply all pending migrations, including `0006_verification_pending_message.sql`, before upgrading. Existing contacts whose data was not erased keep access; returning users who erased their data verify again. `CAPTCHA_ENABLED="false"` sets the initial default to off. `WELCOME_MESSAGE` applies to users' `/start`.
+Usage: each warm Worker caches the list in memory for one minute, so normal messages add at most one settings read per minute; messages without text, such as stickers, skip it. The Worker handling a change applies it immediately, others within a minute. A match writes only one block record and creates no topic or mapping. No dependencies, services, or schedules are added. Existing webhook deduplication still consumes quota on each update; this is not flood protection.
 
-The admin sends `/captcha` privately to view the state, or `/captcha on` / `/captcha off` to change it without redeploying. The setting persists in D1 and takes precedence over the deployment default. Only new or unverified contacts add one settings-row read when needed. Re-enabling does not require previously admitted contacts to verify again, and disabling does not remove existing blocks.
-
-This reduces simple automated ads; programs that solve arithmetic and people can still pass. After the first pending message is handled, normal traffic adds no D1 queries or writes. Unverified contacts' control records are removed after 7 inactive days by the existing cleanup. No dependencies, services, or schedules are added. Existing webhook deduplication still consumes quota on each update; this is not flood protection.
+Apply `0008_keyword_blocklist.sql` before upgrading. The arithmetic check and `/captcha` were removed, and an old `CAPTCHA_ENABLED` variable is ignored. Old data columns are kept. Users still answering a question when you upgrade are relayed directly afterwards; their staged first message is not replayed.
 
 ### Data and limits
 
