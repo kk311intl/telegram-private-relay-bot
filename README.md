@@ -111,7 +111,7 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 |---|---|---|
 | 使用者私訊 Bot | `/start`、`/help`、`/id` | 歡迎訊息、使用說明、自己的 User ID |
 | 管理者私訊 Bot | `/start`、`/help`、`/status` | 設定選單、查指令、查近 24 小時處理狀態與 Webhook 待處理數 |
-| 管理者私訊 Bot | `/unblock USER_ID` | 依 ID 解封，包括已清除資料的封鎖者 |
+| 管理者私訊 Bot | `/unblock USER_ID` | 依 ID 解封，適用於自動封鎖或已無話題的使用者 |
 | 管理者私訊 Bot | `/keywords`、`/keywords add 詞1,詞2`、`/keywords del 詞1,詞2`、`/keywords clear` | 查看、加入、移除或清空關鍵字黑名單 |
 | 管理者私訊 Bot | `/blocked`、`/blocknotice`、`/blocknotice on`、`/blocknotice off` | 查看封鎖清單；查看或開關自動封鎖通知 |
 | 管理群組的使用者話題 | `/user`、`/block`、`/unblock`、`/close`、`/help`、`/status` | 查資料、封鎖／解封、關閉話題、查指令／狀態 |
@@ -279,7 +279,7 @@ Invoke-RestMethod 'https://YOUR_WORKER.YOUR_SUBDOMAIN.workers.dev/ready'
 |---|---|---|
 | Bot との個別チャット（ユーザー） | `/start`、`/help`、`/id` | 開始時のメッセージ、使い方、自分の User ID |
 | Bot との個別チャット（管理者） | `/start`、`/help`、`/status` | メニュー設定、コマンド案内、過去24時間の処理状況と Webhook 保留件数 |
-| Bot との個別チャット（管理者） | `/unblock USER_ID` | ID による解除。消去済みのブロックユーザーも対象 |
+| Bot との個別チャット（管理者） | `/unblock USER_ID` | ID による解除。自動ブロックやトピックのないユーザーにも使えます |
 | Bot との個別チャット（管理者） | `/keywords`、`/keywords add 語1,語2`、`/keywords del 語1,語2`、`/keywords clear` | キーワードのブロックリストの表示、追加、削除、全削除 |
 | Bot との個別チャット（管理者） | `/blocked`、`/blocknotice`、`/blocknotice on`、`/blocknotice off` | ブロック一覧の表示、自動ブロック通知の表示と切り替え |
 | 管理グループのユーザートピック | `/user`、`/block`、`/unblock`、`/close`、`/help`、`/status` | 情報表示、ブロック／解除、トピックを閉じる、案内／状況確認 |
@@ -447,7 +447,7 @@ Users message the bot privately. The admin replies in the matching topic or, in 
 |---|---|---|
 | User's private chat with the bot | `/start`, `/help`, `/id` | Welcome message, instructions, own User ID |
 | Admin's private chat with the bot | `/start`, `/help`, `/status` | Set command menu, show help, see 24-hour processing and webhook pending count |
-| Admin's private chat with the bot | `/unblock USER_ID` | Unblock by ID, including blocked users who erased their data |
+| Admin's private chat with the bot | `/unblock USER_ID` | Unblock by ID, including auto-blocked users and users without a topic |
 | Admin's private chat with the bot | `/keywords`, `/keywords add word1,word2`, `/keywords del word1,word2`, `/keywords clear` | Show, add to, remove from, or clear the keyword blocklist |
 | Admin's private chat with the bot | `/blocked`, `/blocknotice`, `/blocknotice on`, `/blocknotice off` | Show blocked users; show or toggle auto-block notices |
 | User topic in the admin group | `/user`, `/block`, `/unblock`, `/close`, `/help`, `/status` | User details, block/unblock, close topic, help/status |

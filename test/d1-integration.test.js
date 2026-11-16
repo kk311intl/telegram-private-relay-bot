@@ -1256,7 +1256,9 @@ test("編輯事件早於原訊息時會要求重試並在映射建立後同步",
   const edited = {
     edited_message: userMessage(130, { text: "編輯後", entities: [] })
   };
-  await assert.rejects(processUpdate(edited, env), /尚未建立轉送映射/);
+  // Before relay there is nothing to sync; the later copy already carries the edited content.
+  await processUpdate(edited, env);
+  assert.equal(calls.length, 0);
   await processUpdate({ message: userMessage(130, { text: "原訊息" }) }, env);
   await processUpdate(edited, env);
   const editCall = calls.find((call) => call.method === "editMessageText");
@@ -1958,4 +1960,18 @@ test("Telegram 暫時錯誤不改走私訊備援，仍交由重試處理", () =>
   globalThis.fetch = groupDownFetch(calls, "Internal Server Error", 500);
   assert.equal((await worker.fetch(auditRequest(9400, userMessage(10, { text: "稍後重試" })), env)).status, 500);
   assert.equal(calls.some((call) => call.payload.chat_id === "1"), false);
+}));
+
+test("編輯被限速擋下或已過期的訊息不重試、不通知；已放行但對照未存好仍重試", () => withDatabaseMock(async (db) => {
+  const env = { ...auditEnv(db), MESSAGE_INTERVAL_SECONDS: "60" }, calls = [];
+  globalThis.fetch = recordCalls(calls);
+  await processUpdate({ message: userMessage(10, { text: "第一則" }) }, env);
+  await processUpdate({ message: userMessage(11, { text: "太快了" }) }, env);
+  assert.equal(calls.at(-1).payload.text, t("zh", "rateLimit"));
+  calls.length = 0;
+  await processUpdate({ edited_message: userMessage(11, { text: "改了被擋的訊息" }) }, env);
+  await processUpdate({ edited_message: userMessage(5, { text: "改了很久以前的訊息" }) }, env);
+  assert.equal(calls.length, 0);
+  db.database.exec("INSERT INTO rate_admissions(user_id, generation, rate_key, created_at) VALUES ('2', 0, 'message:12', 1)");
+  await assert.rejects(processUpdate({ edited_message: userMessage(12, { text: "對照還沒存好" }) }, env), /尚未建立轉送映射/);
 }));

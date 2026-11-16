@@ -970,9 +970,12 @@ async function processEditedMessage(message, env) {
     "SELECT target_chat_id, target_message_id, user_id FROM message_map WHERE source_chat_id = ? AND source_message_id = ?"
   ).bind(chatId, message.message_id).first();
   if (!mapping) {
-    // Messages held by the retired arithmetic check were never relayed.
-    if (isUserEdit && message.message_id <= (editingUser?.captcha_message_id || 0)) return;
     if (parseCommand(message.text)) return;
+    // Only an admitted message can still be saving its route. Rate-limited, expired or not-yet-relayed
+    // originals have nothing to sync (a late relay copies the edited content anyway), so skip the retries.
+    if (isUserEdit && !(await env.BOT_DB.prepare(`
+      SELECT 1 AS ok FROM rate_admissions WHERE user_id = ? AND rate_key IN (?, ?)
+    `).bind(String(message.from.id), `message:${message.message_id}`, `album:${message.media_group_id ?? ""}`).first())) return;
     if (isAdminPrivateEdit && (env.ADMIN_GROUP_ID || !message.reply_to_message?.message_id)) return;
     throw new RetryableError("編輯訊息尚未建立轉送映射");
   }
